@@ -1,0 +1,41 @@
+{
+	"abstract" : true,
+	"backtrace" : 1,
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"add_library"
+		],
+		"files" : 
+		[
+			"build/_deps/cglm-src/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 146,
+				"parent" : 0
+			}
+		]
+	},
+	"codemodelVersion" : 
+	{
+		"major" : 2,
+		"minor" : 10
+	},
+	"id" : "cglm_headers::@707a5d208a6500c6af2a",
+	"name" : "cglm_headers",
+	"paths" : 
+	{
+		"build" : "_deps/cglm-build",
+		"source" : "build/_deps/cglm-src"
+	},
+	"sources" : [],
+	"type" : "INTERFACE_LIBRARY"
+}

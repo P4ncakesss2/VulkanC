@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/pancake/CLionProjects/VulkanC/build/cmake_install.cmake",
+		"/home/pancake/CLionProjects/VulkanC/build/_deps/glfw-build/cmake_install.cmake",
+		"/home/pancake/CLionProjects/VulkanC/build/_deps/glfw-build/src/cmake_install.cmake",
+		"/home/pancake/CLionProjects/VulkanC/build/_deps/cglm-build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
