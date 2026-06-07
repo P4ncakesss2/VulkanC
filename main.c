@@ -14,8 +14,16 @@ const char *validationLayers[] = {
     "VK_LAYER_KHRONOS_validation"};
 const uint32_t validationLayersCount = sizeof(validationLayers) / sizeof(validationLayers[0]);
 
+#ifdef __APPLE__
 const char *deviceExtensions[] = {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    "VK_KHR_portability_subset" 
+};
+#else
+const char *deviceExtensions[] = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+};
+#endif
 const uint32_t deviceExtensionsCount = sizeof(deviceExtensions) / sizeof(deviceExtensions[0]);
 
 #ifndef NDEBUG
@@ -238,25 +246,30 @@ static const char **get_required_extensions(uint32_t *out_extension_count)
     uint32_t glfw_extension_count = 0;
     const char **glfw_extensions = glfwGetRequiredInstanceExtensions(&glfw_extension_count);
 
+    uint32_t extra_count = 0;
 #ifdef ENABLE_VALIDATION_LAYERS
-    *out_extension_count = glfw_extension_count + 1;
-#else
-    *out_extension_count = glfw_extension_count;
+    extra_count++;
+#endif
+#ifdef __APPLE__
+    extra_count++;
 #endif
 
-    const char **extensions = malloc((*out_extension_count) * sizeof(*extensions));
-    if (extensions == NULL)
-    {
-        return NULL;
-    }
+    *out_extension_count = glfw_extension_count + extra_count;
 
-    for (uint32_t i = 0; i < glfw_extension_count; i++)
-    {
-        extensions[i] = glfw_extensions[i];
+    const char **extensions = malloc((*out_extension_count) * sizeof(*extensions));
+    if (extensions == NULL) return NULL;
+
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < glfw_extension_count; i++) {
+        extensions[idx++] = glfw_extensions[i];
     }
 
 #ifdef ENABLE_VALIDATION_LAYERS
-    extensions[glfw_extension_count] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    extensions[idx++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+#endif
+
+#ifdef __APPLE__
+    extensions[idx++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
 #endif
 
     return extensions;
@@ -325,7 +338,13 @@ static VulkanResult create_instance(Application *app)
         .enabledExtensionCount = required_extensions_count,
         .ppEnabledExtensionNames = required_extensions,
         .enabledLayerCount = 0,
-        .ppEnabledLayerNames = NULL};
+        .ppEnabledLayerNames = NULL,
+        .flags = 0,
+    };
+
+    #ifdef __APPLE__
+        create_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    #endif
 
     VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
