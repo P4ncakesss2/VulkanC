@@ -1,4 +1,3 @@
-// TODO FRAMES IN FLIGHT
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -9,6 +8,7 @@
 
 #define WIDTH 800
 #define HEIGHT 600
+#define MAX_FRAMES_IN_FLIGHT 2
 
 const char *validationLayers[] = {
     "VK_LAYER_KHRONOS_validation"};
@@ -64,11 +64,20 @@ typedef struct Application
     VkPipeline graphicsPipeline;
 
     VkCommandPool commandPool;
-    VkCommandBuffer commandBuffer;
 
-    VkSemaphore presentCompleteSemaphore;
-    VkSemaphore renderFinishedSemaphore;
-    VkFence drawFence;
+    VkCommandBuffer* commandBuffers;
+    uint32_t commandBufferCount;
+
+    VkSemaphore* presentCompleteSemaphores;
+    uint32_t presentCompleteSemaphoreCount;
+
+    VkSemaphore* renderFinishedSemaphores;
+    uint32_t renderFinishedSemaphoreCount;
+
+    VkFence* inFlightFences;
+    uint32_t inFlightFenceCount;
+
+    uint32_t frameIndex;
 } Application;
 
 typedef enum VulkanStatus
@@ -1114,15 +1123,21 @@ static VulkanResult create_command_pool(Application* app) {
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
-static VulkanResult create_command_buffer(Application* app) {
+static VulkanResult create_command_buffers(Application* app) {
+    app->commandBuffers = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
+    if (app->commandBuffers == NULL) {
+        return (VulkanResult){.status = VULKAN_ERROR_OUT_OF_MEMORY, .vk_result = VK_SUCCESS};
+    }
+    app->commandBufferCount = MAX_FRAMES_IN_FLIGHT;
+
     VkCommandBufferAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .pNext = NULL,
         .commandPool = app->commandPool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1
+        .commandBufferCount = MAX_FRAMES_IN_FLIGHT
     };
-    VkResult result = vkAllocateCommandBuffers(app->device, &allocInfo, &app->commandBuffer);
+    VkResult result = vkAllocateCommandBuffers(app->device, &allocInfo, app->commandBuffers);
     if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_CREATION_FAILED, .vk_result = result};
     }
@@ -1131,6 +1146,7 @@ static VulkanResult create_command_buffer(Application* app) {
 
 void transition_image_layout(
     Application* app,
+    VkCommandBuffer          cmd,
     uint32_t                 imageIndex,
     VkImageLayout            old_layout,
     VkImageLayout            new_layout,
@@ -1172,10 +1188,12 @@ void transition_image_layout(
         .pImageMemoryBarriers = &barrier
     };
 
-    vkCmdPipelineBarrier2(app->commandBuffer, &dependencyInfo);
+    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
 }
 
 VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
+    VkCommandBuffer cmd = app->commandBuffers[app->frameIndex];
+
     VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .pNext = NULL,
@@ -1183,13 +1201,14 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
         .pInheritanceInfo = NULL
     };
 
-    VkResult beginResult = vkBeginCommandBuffer(app->commandBuffer, &beginInfo);
+    VkResult beginResult = vkBeginCommandBuffer(cmd, &beginInfo);
     if (beginResult != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_FAILED_BEGIN, .vk_result = beginResult};
     }
 
     transition_image_layout(
         app,
+        cmd,
         imageIndex,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1232,8 +1251,8 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
         .pStencilAttachment = NULL
     };
 
-    vkCmdBeginRendering(app->commandBuffer, &renderingInfo);
-    vkCmdBindPipeline(app->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, app->graphicsPipeline);
+    vkCmdBeginRendering(cmd, &renderingInfo);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, app->graphicsPipeline);
 
     VkViewport viewport = {
         .x = 0.0f,
@@ -1243,21 +1262,22 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
         .minDepth = 0.0f,
         .maxDepth = 1.0f
     };
-    vkCmdSetViewport(app->commandBuffer, 0, 1, &viewport);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
 
     VkRect2D scissor = {
         .offset = {0, 0},
         .extent = app->swapChainExtent
     };
-    vkCmdSetScissor(app->commandBuffer, 0, 1, &scissor);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     //Draw Call (3 vertices, 1 instance)
-    vkCmdDraw(app->commandBuffer, 3, 1, 0, 0);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
 
-    vkCmdEndRendering(app->commandBuffer);
+    vkCmdEndRendering(cmd);
 
     transition_image_layout(
         app,
+        cmd,
         imageIndex,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -1267,7 +1287,7 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
         VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT              // dstStageMask
     );
 
-    VkResult endResult = vkEndCommandBuffer(app->commandBuffer);
+    VkResult endResult = vkEndCommandBuffer(cmd);
     if (endResult != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_FAILED_END, .vk_result = endResult};
     }
@@ -1275,6 +1295,18 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
 }
 
 static VulkanResult create_sync_objects(Application* app) {
+    app->presentCompleteSemaphores = malloc(app->swapChainImageCount * sizeof(VkSemaphore));
+    app->renderFinishedSemaphores = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkSemaphore));
+    app->inFlightFences = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkFence));
+
+    if (!app->presentCompleteSemaphores || !app->renderFinishedSemaphores || !app->inFlightFences) {
+        return (VulkanResult){.status = VULKAN_ERROR_OUT_OF_MEMORY, .vk_result = VK_SUCCESS};
+    }
+
+    app->presentCompleteSemaphoreCount = app->swapChainImageCount;
+    app->renderFinishedSemaphoreCount = MAX_FRAMES_IN_FLIGHT;
+    app->inFlightFenceCount = MAX_FRAMES_IN_FLIGHT;
+
     VkSemaphoreCreateInfo semaphoreInfo = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
@@ -1283,9 +1315,14 @@ static VulkanResult create_sync_objects(Application* app) {
         .flags = VK_FENCE_CREATE_SIGNALED_BIT
     };
 
-    vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->presentCompleteSemaphore);
-    vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->renderFinishedSemaphore);
-    vkCreateFence(app->device, &fenceInfo, NULL, &app->drawFence);
+    for(uint32_t i=0; i < app->swapChainImageCount; i++) {
+        vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->presentCompleteSemaphores[i]);
+    }
+    for(uint32_t i=0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->renderFinishedSemaphores[i]);
+        vkCreateFence(app->device, &fenceInfo, NULL, &app->inFlightFences[i]);
+    }
+
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -1318,7 +1355,7 @@ static VulkanResult init_vulkan(Application *app)
     res = create_command_pool(app);
     if (res.status != VULKAN_SUCCESS)
         return res;
-    res = create_command_buffer(app);
+    res = create_command_buffers(app);
     if (res.status != VULKAN_SUCCESS)
         return res;
     res = create_sync_objects(app);
@@ -1326,17 +1363,18 @@ static VulkanResult init_vulkan(Application *app)
 }
 
 static VulkanResult draw_frame(Application* app) {
-    VkResult result = vkWaitForFences(app->device, 1, &app->drawFence, VK_TRUE, UINT64_MAX);
+    uint32_t frameIndex = app->frameIndex;
+    VkResult result = vkWaitForFences(app->device, 1, &app->inFlightFences[frameIndex], VK_TRUE, UINT64_MAX);
     if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_FENCE_WAIT_FAILED, .vk_result = result};
     }
-    vkResetFences(app->device, 1, &app->drawFence);
+    vkResetFences(app->device, 1, &app->inFlightFences[frameIndex]);
     uint32_t imageIndex;
     result = vkAcquireNextImageKHR(
         app->device,
         app->swapChain,
         UINT64_MAX,
-        app->presentCompleteSemaphore,
+        app->presentCompleteSemaphores[frameIndex],
         VK_NULL_HANDLE,
         &imageIndex
     );
@@ -1349,18 +1387,18 @@ static VulkanResult draw_frame(Application* app) {
     VkSubmitInfo submitInfo = {0};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = &app->presentCompleteSemaphore;
+    submitInfo.pWaitSemaphores = &app->presentCompleteSemaphores[frameIndex];
     submitInfo.pWaitDstStageMask = &waitDestinationStageMask;
     submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &app->commandBuffer;
+    submitInfo.pCommandBuffers = &app->commandBuffers[frameIndex];
     submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = &app->renderFinishedSemaphore;
+    submitInfo.pSignalSemaphores = &app->renderFinishedSemaphores[frameIndex];
 
     result = vkQueueSubmit(
         app->queues.graphics,
         1,
         &submitInfo,
-        app->drawFence
+        app->inFlightFences[frameIndex]
     );
     if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_QUEUE_SUBMIT_FAILED, .vk_result = result};
@@ -1368,7 +1406,7 @@ static VulkanResult draw_frame(Application* app) {
     VkPresentInfoKHR presentInfo = {0};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &app->renderFinishedSemaphore;
+    presentInfo.pWaitSemaphores = &app->renderFinishedSemaphores[frameIndex];;
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &app->swapChain;
     presentInfo.pImageIndices = &imageIndex;
@@ -1378,6 +1416,7 @@ static VulkanResult draw_frame(Application* app) {
     if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_QUEUE_PRESENT_FAILED, .vk_result = result};
     }
+    app->frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -1396,22 +1435,51 @@ static VulkanResult main_loop(Application *app)
 
 static void cleanup(Application *app)
 {
-    if (app->presentCompleteSemaphore != VK_NULL_HANDLE) {
-        vkDestroySemaphore(app->device, app->presentCompleteSemaphore, NULL);
+    if (app->device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(app->device);
     }
-    if (app->renderFinishedSemaphore != VK_NULL_HANDLE) {
-        vkDestroySemaphore(app->device, app->renderFinishedSemaphore, NULL);
+
+    if (app->presentCompleteSemaphores != NULL) {
+        for (uint32_t i = 0; i < app->swapChainImageCount; i++) {
+            if (app->presentCompleteSemaphores[i] != VK_NULL_HANDLE) {
+                vkDestroySemaphore(app->device, app->presentCompleteSemaphores[i], NULL);
+            }
+        }
+        free(app->presentCompleteSemaphores);
+        app->presentCompleteSemaphores = NULL;
     }
-    if (app->drawFence != VK_NULL_HANDLE) {
-        vkDestroyFence(app->device, app->drawFence, NULL);
+
+    if (app->renderFinishedSemaphores != NULL) {
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            if (app->renderFinishedSemaphores[i] != VK_NULL_HANDLE) {
+                vkDestroySemaphore(app->device, app->renderFinishedSemaphores[i], NULL);
+            }
+        }
+        free(app->renderFinishedSemaphores);
+        app->renderFinishedSemaphores = NULL;
     }
+
+    if (app->inFlightFences != NULL) {
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            if (app->inFlightFences[i] != VK_NULL_HANDLE) {
+                vkDestroyFence(app->device, app->inFlightFences[i], NULL);
+            }
+        }
+        free(app->inFlightFences);
+        app->inFlightFences = NULL;
+    }
+
+    if (app->commandBuffers != NULL) {
+        free(app->commandBuffers);
+        app->commandBuffers = NULL;
+    }
+
     if (app->commandPool != VK_NULL_HANDLE) {
         vkDestroyCommandPool(app->device, app->commandPool, NULL);
     }
     if (app->graphicsPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(app->device, app->graphicsPipeline, NULL);
     }
-    
     if (app->pipelineLayout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(app->device, app->pipelineLayout, NULL);
     }
@@ -1478,6 +1546,15 @@ static VulkanResult app_run(Application *app)
     app->swapChain = VK_NULL_HANDLE;
     app->swapChainImageCount = 0;
     app->swapChainImages = NULL;
+    app->frameIndex = 0;
+    app->commandBuffers = NULL;
+    app->commandBufferCount = 0;
+    app->presentCompleteSemaphores = NULL;
+    app->presentCompleteSemaphoreCount = 0;
+    app->renderFinishedSemaphores = NULL;
+    app->renderFinishedSemaphoreCount = 0;
+    app->inFlightFences = NULL;
+    app->inFlightFenceCount = 0;
 
     VulkanResult res = init_window(app);
     if (res.status != VULKAN_SUCCESS)
