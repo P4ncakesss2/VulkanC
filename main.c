@@ -1,3 +1,7 @@
+//TODO:
+// - ADD PROPER VSYNC SUPPORT
+// - ADD VMA (VULKAN MEMORY ALLOCATOR) (https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator)
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -854,7 +858,7 @@ static uint32_t choose_swap_min_image_count(const VkSurfaceCapabilitiesKHR *surf
     return minImageCount;
 }
 
-static VulkanResult create_swap_chain(Application *app)
+static VulkanResult create_swap_chain(Application *app, VkSwapchainKHR oldSwapchain)
 {
     VkSurfaceCapabilitiesKHR surfaceCapabilities;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(app->physicalDevice, app->surface, &surfaceCapabilities);
@@ -902,13 +906,20 @@ static VulkanResult create_swap_chain(Application *app)
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = presentMode,
         .clipped = VK_TRUE,
-        .oldSwapchain = VK_NULL_HANDLE};
+        .oldSwapchain = oldSwapchain
+    };
 
-    VkResult create_result = vkCreateSwapchainKHR(app->device, &swapChainCreateInfo, NULL, &app->swapChain);
+    VkSwapchainKHR newSwapChain;
+    VkResult create_result = vkCreateSwapchainKHR(app->device, &swapChainCreateInfo, NULL, &newSwapChain);
     if (create_result != VK_SUCCESS)
     {
         return (VulkanResult){.status = VULKAN_ERROR_SWAPCHAIN_CREATION_FAILED, .vk_result = create_result};
     }
+    if (oldSwapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(app->device, oldSwapchain, NULL);
+    }
+
+    app->swapChain = newSwapChain;
 
     vkGetSwapchainImagesKHR(app->device, app->swapChain, &app->swapChainImageCount, NULL);
     app->swapChainImages = malloc(app->swapChainImageCount * sizeof(VkImage));
@@ -1567,7 +1578,7 @@ static VulkanResult init_vulkan(Application *app)
     res = create_logical_device(app);
     if (res.status != VULKAN_SUCCESS)
         return res;
-    res = create_swap_chain(app);
+    res = create_swap_chain(app, VK_NULL_HANDLE);
     if (res.status != VULKAN_SUCCESS)
         return res;
     res = create_image_views(app);
@@ -1626,9 +1637,12 @@ static VulkanResult recreate_swapchain(Application* app) {
         glfwWaitEvents();
     }
     vkDeviceWaitIdle(app->device);
-    cleanup_swapchain(app);
 
-    create_swap_chain(app);
+    VkSwapchainKHR oldSwapchain = app->swapChain;
+    app->swapChain = VK_NULL_HANDLE;
+
+    cleanup_swapchain(app);
+    create_swap_chain(app, oldSwapchain);
     create_image_views(app);
     
     app->renderFinishedSemaphoreCount = app->swapChainImageCount;
