@@ -83,8 +83,8 @@ typedef struct Application
     uint32_t frameIndex;
     bool framebufferResized;
 
-    VkBuffer vertexBuffer;
-    VkDeviceMemory vertexBufferMemory;
+    VkBuffer geometryBuffer;
+    VkDeviceMemory geometryBufferMemory;
 } Application;
 
 typedef enum VulkanStatus
@@ -133,9 +133,14 @@ typedef struct Vertex {
 } Vertex;
 
 const Vertex vertices[] = {
-    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+};
+
+const uint16_t indices[] = {
+    0, 1, 2, 2, 3, 0
 };
 
 static void vertex_get_binding_description(VkVertexInputBindingDescription* desc) {
@@ -1316,9 +1321,6 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
     vkCmdBeginRendering(cmd, &renderingInfo);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, app->graphicsPipeline);
 
-    VkDeviceSize offsets[] = { 0 };
-    vkCmdBindVertexBuffers(cmd, 0, 1, &app->vertexBuffer, offsets);
-
     VkViewport viewport = {
         .x = 0.0f,
         .y = 0.0f,
@@ -1335,7 +1337,12 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
     };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    vkCmdDraw(cmd, sizeof(vertices), 1, 0, 0);
+    VkDeviceSize vertexOffset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &app->geometryBuffer, &vertexOffset);
+    VkDeviceSize indexOffset = sizeof(vertices); 
+    vkCmdBindIndexBuffer(cmd, app->geometryBuffer, indexOffset, VK_INDEX_TYPE_UINT16);
+    uint32_t indexCount = sizeof(indices) / sizeof(indices[0]);
+    vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
 
     vkCmdEndRendering(cmd);
 
@@ -1476,69 +1483,62 @@ static VulkanResult create_buffer(Application* app, VkBufferCreateInfo* info, Vk
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
-static VulkanResult create_vertex_buffer(Application* app) {
-    VkDeviceSize bufferSize = sizeof(vertices); 
+static VulkanResult create_geometry_buffer(Application* app) {
+    VkDeviceSize vertexSize = sizeof(vertices);
+    VkDeviceSize indexSize = sizeof(indices);
+    VkDeviceSize totalSize = vertexSize + indexSize;
 
     uint32_t families[] = { app->queues.graphicsFamilyIndex, app->queues.transferFamilyIndex };
 
-    VkBufferCreateInfo stagingbufferInfo = {
+    VkBufferCreateInfo stagingInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = bufferSize,
+        .size = totalSize,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
     };
 
-    VkBufferCreateInfo vertexbufferInfo = {
+    VkBufferCreateInfo deviceBufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = bufferSize,
-        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .size = totalSize,
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | 
+                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT | 
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
     };
 
     if (app->queues.graphicsFamilyIndex == app->queues.transferFamilyIndex) {
-        stagingbufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        vertexbufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        deviceBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     } else {
-        stagingbufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-        stagingbufferInfo.queueFamilyIndexCount = 2;
-        stagingbufferInfo.pQueueFamilyIndices = families;
+        stagingInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+        stagingInfo.queueFamilyIndexCount = 2;
+        stagingInfo.pQueueFamilyIndices = families;
 
-        vertexbufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-        vertexbufferInfo.queueFamilyIndexCount = 2;
-        vertexbufferInfo.pQueueFamilyIndices = families;
+        deviceBufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+        deviceBufferInfo.queueFamilyIndexCount = 2;
+        deviceBufferInfo.pQueueFamilyIndices = families;
     }
 
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingBufferMemory;
-    VulkanResult res = create_buffer(app,
-        &stagingbufferInfo,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        &stagingBuffer,
-        &stagingBufferMemory
-    );
+    VulkanResult res = create_buffer(app, &stagingInfo, 
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 
+        &stagingBuffer, &stagingBufferMemory);
     if (res.status != VULKAN_SUCCESS) return res;
 
     void* dataStaging;
-    VkResult result = vkMapMemory(app->device, stagingBufferMemory, 0, bufferSize, 0, &dataStaging);
-    if (result != VK_SUCCESS) {
-        vkDestroyBuffer(app->device, stagingBuffer, NULL);
-        vkFreeMemory(app->device, stagingBufferMemory, NULL);
-        return (VulkanResult){.status = VULKAN_ERROR_MEMORY_MAP_FAILED, .vk_result = result};
-    }
-    memcpy(dataStaging, vertices, bufferSize);
+    vkMapMemory(app->device, stagingBufferMemory, 0, totalSize, 0, &dataStaging);
+    memcpy(dataStaging, vertices, vertexSize);
+    memcpy((char*)dataStaging + vertexSize, indices, indexSize);
     vkUnmapMemory(app->device, stagingBufferMemory);
 
-    res = create_buffer(app,
-        &vertexbufferInfo,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        &app->vertexBuffer,
-        &app->vertexBufferMemory
-    );
+    res = create_buffer(app, &deviceBufferInfo, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 
+        &app->geometryBuffer, &app->geometryBufferMemory);
     if (res.status != VULKAN_SUCCESS) {
         vkDestroyBuffer(app->device, stagingBuffer, NULL);
         vkFreeMemory(app->device, stagingBufferMemory, NULL);
         return res;
     }
 
-    copy_buffer(app, &stagingBuffer, &app->vertexBuffer, bufferSize);
+    copy_buffer(app, &stagingBuffer, &app->geometryBuffer, totalSize);
     vkDestroyBuffer(app->device, stagingBuffer, NULL);
     vkFreeMemory(app->device, stagingBufferMemory, NULL);
 
@@ -1574,7 +1574,7 @@ static VulkanResult init_vulkan(Application *app)
     res = create_command_pools(app);
     if (res.status != VULKAN_SUCCESS)
         return res;
-    res = create_vertex_buffer(app);
+    res = create_geometry_buffer(app);
     if (res.status != VULKAN_SUCCESS)
         return res;
     res = create_command_buffer(app);
@@ -1709,12 +1709,12 @@ static void cleanup(Application *app)
         vkDeviceWaitIdle(app->device);
     }
 
-    if (app->vertexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(app->device, app->vertexBuffer, NULL);
+    if (app->geometryBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(app->device, app->geometryBuffer, NULL);
     }
 
-    if (app->vertexBufferMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(app->device, app->vertexBufferMemory, NULL);
+    if (app->geometryBufferMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(app->device, app->geometryBufferMemory, NULL);
     }
 
     if (app->presentCompleteSemaphores != NULL) {
