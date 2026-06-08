@@ -85,6 +85,9 @@ typedef struct Application
 
     VkBuffer geometryBuffer;
     VkDeviceMemory geometryBufferMemory;
+
+    uint32_t frameCounter;
+    double lastSecond;
 } Application;
 
 typedef enum VulkanStatus
@@ -1366,17 +1369,17 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
 }
 
 static VulkanResult create_sync_objects(Application* app) {
-    app->presentCompleteSemaphores = malloc(app->swapChainImageCount * sizeof(VkSemaphore));
-    app->renderFinishedSemaphores = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkSemaphore));
-    app->inFlightFences = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkFence));
+    app->presentCompleteSemaphoreCount = MAX_FRAMES_IN_FLIGHT;
+    app->renderFinishedSemaphoreCount = app->swapChainImageCount;
+    app->inFlightFenceCount = MAX_FRAMES_IN_FLIGHT;
+
+    app->presentCompleteSemaphores = malloc(app->presentCompleteSemaphoreCount * sizeof(VkSemaphore));
+    app->renderFinishedSemaphores = malloc(app->renderFinishedSemaphoreCount * sizeof(VkSemaphore));
+    app->inFlightFences = malloc(app->inFlightFenceCount * sizeof(VkFence));
 
     if (!app->presentCompleteSemaphores || !app->renderFinishedSemaphores || !app->inFlightFences) {
         return (VulkanResult){.status = VULKAN_ERROR_OUT_OF_MEMORY, .vk_result = VK_SUCCESS};
     }
-
-    app->presentCompleteSemaphoreCount = app->swapChainImageCount;
-    app->renderFinishedSemaphoreCount = MAX_FRAMES_IN_FLIGHT;
-    app->inFlightFenceCount = MAX_FRAMES_IN_FLIGHT;
 
     VkSemaphoreCreateInfo semaphoreInfo = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -1386,12 +1389,14 @@ static VulkanResult create_sync_objects(Application* app) {
         .flags = VK_FENCE_CREATE_SIGNALED_BIT
     };
 
-    for(uint32_t i=0; i < app->swapChainImageCount; i++) {
+    for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) 
+    {
         vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->presentCompleteSemaphores[i]);
-    }
-    for(uint32_t i=0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->renderFinishedSemaphores[i]);
         vkCreateFence(app->device, &fenceInfo, NULL, &app->inFlightFences[i]);
+    }
+    
+    for(uint32_t i=0; i < app->renderFinishedSemaphoreCount; i++) {
+        vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->renderFinishedSemaphores[i]);
     }
 
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
@@ -1585,6 +1590,15 @@ static VulkanResult init_vulkan(Application *app)
 }
 
 static void cleanup_swapchain(Application* app) {
+    if (app->renderFinishedSemaphores != NULL) {
+        for (uint32_t i = 0; i < app->renderFinishedSemaphoreCount; i++) {
+            if (app->renderFinishedSemaphores[i] != VK_NULL_HANDLE) {
+                vkDestroySemaphore(app->device, app->renderFinishedSemaphores[i], NULL);
+            }
+        }
+        free(app->renderFinishedSemaphores);
+        app->renderFinishedSemaphores = NULL;
+    }
     if (app->swapChainImageViews != NULL) {
         for (uint32_t i = 0; i < app->swapChainImageViewCount; i++) {
             if (app->swapChainImageViews[i] != VK_NULL_HANDLE) {
@@ -1616,6 +1630,13 @@ static VulkanResult recreate_swapchain(Application* app) {
 
     create_swap_chain(app);
     create_image_views(app);
+    
+    app->renderFinishedSemaphoreCount = app->swapChainImageCount;
+    app->renderFinishedSemaphores = malloc(app->renderFinishedSemaphoreCount * sizeof(VkSemaphore));
+    VkSemaphoreCreateInfo semaphoreInfo = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    for(uint32_t i = 0; i < app->renderFinishedSemaphoreCount; i++) {
+        vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->renderFinishedSemaphores[i]);
+    }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -1657,7 +1678,7 @@ static VulkanResult draw_frame(Application* app) {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &app->graphicsCommandBuffers[frameIndex];
     submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = &app->renderFinishedSemaphores[frameIndex];
+    submitInfo.pSignalSemaphores = &app->renderFinishedSemaphores[imageIndex];
 
     result = vkQueueSubmit(
         app->queues.graphics,
@@ -1672,7 +1693,7 @@ static VulkanResult draw_frame(Application* app) {
     VkPresentInfoKHR presentInfo = {0};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &app->renderFinishedSemaphores[frameIndex];
+    presentInfo.pWaitSemaphores = &app->renderFinishedSemaphores[imageIndex];
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &app->swapChain;
     presentInfo.pImageIndices = &imageIndex;
@@ -1692,13 +1713,23 @@ static VulkanResult draw_frame(Application* app) {
 
 static VulkanResult main_loop(Application *app)
 {
+    app->lastSecond = glfwGetTime();
     while (!glfwWindowShouldClose(app->window))
     {
         glfwPollEvents();
         VulkanResult res = draw_frame(app);
         if (res.status != VULKAN_SUCCESS)
             return res;
-        vkDeviceWaitIdle(app->device);
+        app->frameCounter++;
+        float now = glfwGetTime();
+        if (now - app->lastSecond >= 1) {
+            char titleBuffer[128];
+            snprintf(titleBuffer, sizeof(titleBuffer), "Vulkan | FPS: %d", app->frameCounter );
+            glfwSetWindowTitle(app->window, titleBuffer);
+
+            app->lastSecond = now;
+            app->frameCounter = 0;
+        }
     }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
@@ -1718,23 +1749,13 @@ static void cleanup(Application *app)
     }
 
     if (app->presentCompleteSemaphores != NULL) {
-        for (uint32_t i = 0; i < app->swapChainImageCount; i++) {
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             if (app->presentCompleteSemaphores[i] != VK_NULL_HANDLE) {
                 vkDestroySemaphore(app->device, app->presentCompleteSemaphores[i], NULL);
             }
         }
         free(app->presentCompleteSemaphores);
         app->presentCompleteSemaphores = NULL;
-    }
-
-    if (app->renderFinishedSemaphores != NULL) {
-        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            if (app->renderFinishedSemaphores[i] != VK_NULL_HANDLE) {
-                vkDestroySemaphore(app->device, app->renderFinishedSemaphores[i], NULL);
-            }
-        }
-        free(app->renderFinishedSemaphores);
-        app->renderFinishedSemaphores = NULL;
     }
 
     if (app->inFlightFences != NULL) {
