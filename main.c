@@ -5,6 +5,8 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include "tinyfiledialogs.h"
+#include "cglm/cglm.h"
+#include <stdbool.h>
 
 #define WIDTH 800
 #define HEIGHT 600
@@ -63,10 +65,11 @@ typedef struct Application
     VkPipelineLayout pipelineLayout;
     VkPipeline graphicsPipeline;
 
-    VkCommandPool commandPool;
+    VkCommandPool graphicsCommandPool;
+    VkCommandPool transferCommandPool;
 
-    VkCommandBuffer* commandBuffers;
-    uint32_t commandBufferCount;
+    VkCommandBuffer* graphicsCommandBuffers;
+    uint32_t graphicsCommandBufferCount;
 
     VkSemaphore* presentCompleteSemaphores;
     uint32_t presentCompleteSemaphoreCount;
@@ -78,6 +81,10 @@ typedef struct Application
     uint32_t inFlightFenceCount;
 
     uint32_t frameIndex;
+    bool framebufferResized;
+
+    VkBuffer vertexBuffer;
+    VkDeviceMemory vertexBufferMemory;
 } Application;
 
 typedef enum VulkanStatus
@@ -86,6 +93,7 @@ typedef enum VulkanStatus
     VULKAN_STATUS_NO_COMPATIBLE_GPU = 1,
     VULKAN_STATUS_EXTENSIONS_UNSUPPORTED = 2,
     VULKAN_STATUS_LAYERS_UNSUPPORTED = 3,
+
     VULKAN_ERROR_OUT_OF_MEMORY = -1,
     VULKAN_ERROR_INIT_FAILED = -2,
     VULKAN_ERROR_WINDOW_CREATION_FAILED = -3,
@@ -106,6 +114,11 @@ typedef enum VulkanStatus
     VULKAN_ERROR_SWAPCHAIN_NEXT_IMAGE_FAILED = -18,
     VULKAN_ERROR_QUEUE_SUBMIT_FAILED = -19,
     VULKAN_ERROR_QUEUE_PRESENT_FAILED = -20,
+    VULKAN_ERROR_BUFFER_CREATION_FAILED = -21,
+    VULKAN_ERROR_MEMORY_TYPE_FIND_FAILED = -22,
+    VULKAN_ERROR_MEMORY_ALLOCATION_FAILED = -23,
+    VULKAN_ERROR_MEMORY_MAP_FAILED = -24,
+    VULKAN_ERROR_MEMORY_BIND_FAILED = -25
 } VulkanStatus;
 
 typedef struct VulkanResult
@@ -113,6 +126,35 @@ typedef struct VulkanResult
     VulkanStatus status;
     VkResult vk_result;
 } VulkanResult;
+
+typedef struct Vertex {
+    vec2 pos;
+    vec3 color;
+} Vertex;
+
+const Vertex vertices[] = {
+    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+};
+
+static void vertex_get_binding_description(VkVertexInputBindingDescription* desc) {
+    desc->binding = 0;
+    desc->stride = sizeof(Vertex);
+    desc->inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+}
+
+static void vertex_get_attribute_destription(VkVertexInputAttributeDescription attributes[2]) {
+    attributes[0].location = 0;
+    attributes[0].binding = 0;
+    attributes[0].format = VK_FORMAT_R32G32_SFLOAT;
+    attributes[0].offset = offsetof(Vertex, pos);
+
+    attributes[1].location = 1;
+    attributes[1].binding = 0;
+    attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributes[1].offset = offsetof(Vertex, color);
+}
 
 char* read_file(const char* filename, size_t* outSize) {
     FILE* file = fopen(filename, "rb");
@@ -180,14 +222,22 @@ static void destroy_debug_utils_messenger_ext(VkInstance instance, VkDebugUtilsM
     }
 }
 
+static void framebufferResizeCallback(GLFWwindow* window, int width, int height)
+{
+    Application* app = (Application*)glfwGetWindowUserPointer(window);
+    app->framebufferResized = true;
+}
+
 static VulkanResult init_window(Application *app)
 {
     glfwInit();
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    //glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
     app->window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", NULL, NULL);
+    glfwSetWindowUserPointer(app->window, app);
+    glfwSetFramebufferSizeCallback(app->window, framebufferResizeCallback);
     if (app->window == NULL)
         return (VulkanResult){.status = VULKAN_ERROR_WINDOW_CREATION_FAILED, .vk_result = VK_SUCCESS};
 
@@ -961,14 +1011,20 @@ static VulkanResult create_graphics_pipeline(Application* app) {
 
     VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
+    VkVertexInputBindingDescription bindingDescription;
+    VkVertexInputAttributeDescription attributeDescriptions[2];
+
+    vertex_get_binding_description(&bindingDescription);
+    vertex_get_attribute_destription(attributeDescriptions);
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .pNext = NULL,
         .flags = 0,
-        .vertexBindingDescriptionCount = 0,
-        .pVertexBindingDescriptions = NULL,
-        .vertexAttributeDescriptionCount = 0,
-        .pVertexAttributeDescriptions = NULL
+        .vertexBindingDescriptionCount = 1, 
+        .pVertexBindingDescriptions = &bindingDescription, 
+        .vertexAttributeDescriptionCount = 2,
+        .pVertexAttributeDescriptions = attributeDescriptions
     };
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
@@ -1109,35 +1165,41 @@ static VulkanResult create_graphics_pipeline(Application* app) {
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
-static VulkanResult create_command_pool(Application* app) {
+static VulkanResult create_command_pools(Application* app) {
     VkCommandPoolCreateInfo poolInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .pNext = NULL,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = app->queues.graphicsFamilyIndex
     };
-    VkResult poolResult = vkCreateCommandPool(app->device, &poolInfo, NULL, &app->commandPool);
+    VkResult poolResult = vkCreateCommandPool(app->device, &poolInfo, NULL, &app->graphicsCommandPool);
+    if (poolResult != VK_SUCCESS) {
+        return (VulkanResult){.status = VULKAN_ERROR_COMMAND_POOL_CREATION_FAILED, .vk_result = poolResult};
+    }
+    poolInfo.queueFamilyIndex = app->queues.transferFamilyIndex;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolResult = vkCreateCommandPool(app->device, &poolInfo, NULL, &app->transferCommandPool);
     if (poolResult != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_COMMAND_POOL_CREATION_FAILED, .vk_result = poolResult};
     }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
-static VulkanResult create_command_buffers(Application* app) {
-    app->commandBuffers = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
-    if (app->commandBuffers == NULL) {
+static VulkanResult create_command_buffer(Application* app) {
+    app->graphicsCommandBuffers = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
+    if (app->graphicsCommandBuffers == NULL) {
         return (VulkanResult){.status = VULKAN_ERROR_OUT_OF_MEMORY, .vk_result = VK_SUCCESS};
     }
-    app->commandBufferCount = MAX_FRAMES_IN_FLIGHT;
+    app->graphicsCommandBufferCount = MAX_FRAMES_IN_FLIGHT;
 
     VkCommandBufferAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .pNext = NULL,
-        .commandPool = app->commandPool,
+        .commandPool = app->graphicsCommandPool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = MAX_FRAMES_IN_FLIGHT
     };
-    VkResult result = vkAllocateCommandBuffers(app->device, &allocInfo, app->commandBuffers);
+    VkResult result = vkAllocateCommandBuffers(app->device, &allocInfo, app->graphicsCommandBuffers);
     if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_CREATION_FAILED, .vk_result = result};
     }
@@ -1192,7 +1254,7 @@ void transition_image_layout(
 }
 
 VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
-    VkCommandBuffer cmd = app->commandBuffers[app->frameIndex];
+    VkCommandBuffer cmd = app->graphicsCommandBuffers[app->frameIndex];
 
     VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -1254,6 +1316,9 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
     vkCmdBeginRendering(cmd, &renderingInfo);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, app->graphicsPipeline);
 
+    VkDeviceSize offsets[] = { 0 };
+    vkCmdBindVertexBuffers(cmd, 0, 1, &app->vertexBuffer, offsets);
+
     VkViewport viewport = {
         .x = 0.0f,
         .y = 0.0f,
@@ -1270,8 +1335,7 @@ VulkanResult record_command_buffer(Application* app, uint32_t imageIndex) {
     };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    //Draw Call (3 vertices, 1 instance)
-    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdDraw(cmd, sizeof(vertices), 1, 0, 0);
 
     vkCmdEndRendering(cmd);
 
@@ -1326,6 +1390,161 @@ static VulkanResult create_sync_objects(Application* app) {
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
+static int find_memory_type(Application* app, uint32_t typeFilter, VkMemoryPropertyFlags properties, uint32_t* outIndex) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(app->physicalDevice, &memProperties);
+
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+    {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+        {
+            *outIndex = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static VulkanResult copy_buffer(Application* app, VkBuffer* srcBuffer, VkBuffer* dstBuffer, VkDeviceSize size) {
+    VkCommandBufferAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = app->transferCommandPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBufferBeginInfo beginInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = NULL,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = NULL
+    };
+    VkCommandBuffer commandCopyBuffer;
+    vkAllocateCommandBuffers(app->device, &allocInfo, &commandCopyBuffer);
+    vkBeginCommandBuffer(commandCopyBuffer, &beginInfo);
+
+    VkBufferCopy copyRegion = {
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .size = size
+    };
+    vkCmdCopyBuffer(commandCopyBuffer, *srcBuffer, *dstBuffer, 1, &copyRegion);
+    vkEndCommandBuffer(commandCopyBuffer);
+    VkSubmitInfo submitInfo = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = NULL,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = NULL,
+        .pWaitDstStageMask = NULL,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &commandCopyBuffer,
+        .signalSemaphoreCount = 0,
+        .pSignalSemaphores = NULL
+    };
+
+    VkResult submitResult = vkQueueSubmit(app->queues.transfer, 1, &submitInfo, VK_NULL_HANDLE);
+    if (submitResult != VK_SUCCESS) {
+        return (VulkanResult){.status = VULKAN_ERROR_QUEUE_SUBMIT_FAILED, .vk_result = submitResult};
+    }
+    vkQueueWaitIdle(app->queues.transfer);
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
+static VulkanResult create_buffer(Application* app, VkBufferCreateInfo* info, VkMemoryPropertyFlags properties, VkBuffer* outBuffer, VkDeviceMemory* outMemory) {
+    VkResult result = vkCreateBuffer(app->device, info, NULL, outBuffer);
+    if (result != VK_SUCCESS) {
+        return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
+    }
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(app->device, *outBuffer, &memRequirements);
+    uint32_t memoryTypeIndex;
+    if (!find_memory_type(app, memRequirements.memoryTypeBits, properties, &memoryTypeIndex)) {
+        return (VulkanResult){.status = VULKAN_ERROR_MEMORY_TYPE_FIND_FAILED, .vk_result = VK_ERROR_UNKNOWN}; 
+    }
+    VkMemoryAllocateInfo memoryAllocateInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = memoryTypeIndex,
+    };
+    result = vkAllocateMemory(app->device, &memoryAllocateInfo, NULL, outMemory);
+    if (result != VK_SUCCESS) {
+        return (VulkanResult){.status = VULKAN_ERROR_MEMORY_ALLOCATION_FAILED, .vk_result = result};
+    }
+    result = vkBindBufferMemory(app->device, *outBuffer, *outMemory, 0);
+    if (result != VK_SUCCESS) {
+        return (VulkanResult){.status = VULKAN_ERROR_MEMORY_BIND_FAILED, .vk_result = result};
+    }
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
+static VulkanResult create_vertex_buffer(Application* app) {
+    VkDeviceSize bufferSize = sizeof(vertices); 
+
+    uint32_t families[] = { app->queues.graphicsFamilyIndex, app->queues.transferFamilyIndex };
+
+    VkBufferCreateInfo stagingbufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = bufferSize,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    };
+
+    VkBufferCreateInfo vertexbufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = bufferSize,
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    };
+
+    if (app->queues.graphicsFamilyIndex == app->queues.transferFamilyIndex) {
+        stagingbufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vertexbufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    } else {
+        stagingbufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+        stagingbufferInfo.queueFamilyIndexCount = 2;
+        stagingbufferInfo.pQueueFamilyIndices = families;
+
+        vertexbufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+        vertexbufferInfo.queueFamilyIndexCount = 2;
+        vertexbufferInfo.pQueueFamilyIndices = families;
+    }
+
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    VulkanResult res = create_buffer(app,
+        &stagingbufferInfo,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &stagingBuffer,
+        &stagingBufferMemory
+    );
+    if (res.status != VULKAN_SUCCESS) return res;
+
+    void* dataStaging;
+    VkResult result = vkMapMemory(app->device, stagingBufferMemory, 0, bufferSize, 0, &dataStaging);
+    if (result != VK_SUCCESS) {
+        vkDestroyBuffer(app->device, stagingBuffer, NULL);
+        vkFreeMemory(app->device, stagingBufferMemory, NULL);
+        return (VulkanResult){.status = VULKAN_ERROR_MEMORY_MAP_FAILED, .vk_result = result};
+    }
+    memcpy(dataStaging, vertices, bufferSize);
+    vkUnmapMemory(app->device, stagingBufferMemory);
+
+    res = create_buffer(app,
+        &vertexbufferInfo,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        &app->vertexBuffer,
+        &app->vertexBufferMemory
+    );
+    if (res.status != VULKAN_SUCCESS) {
+        vkDestroyBuffer(app->device, stagingBuffer, NULL);
+        vkFreeMemory(app->device, stagingBufferMemory, NULL);
+        return res;
+    }
+
+    copy_buffer(app, &stagingBuffer, &app->vertexBuffer, bufferSize);
+    vkDestroyBuffer(app->device, stagingBuffer, NULL);
+    vkFreeMemory(app->device, stagingBufferMemory, NULL);
+
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
 static VulkanResult init_vulkan(Application *app)
 {
     VulkanResult res = create_instance(app);
@@ -1352,23 +1571,62 @@ static VulkanResult init_vulkan(Application *app)
     res = create_graphics_pipeline(app);
     if (res.status != VULKAN_SUCCESS)
         return res;
-    res = create_command_pool(app);
+    res = create_command_pools(app);
     if (res.status != VULKAN_SUCCESS)
         return res;
-    res = create_command_buffers(app);
+    res = create_vertex_buffer(app);
+    if (res.status != VULKAN_SUCCESS)
+        return res;
+    res = create_command_buffer(app);
     if (res.status != VULKAN_SUCCESS)
         return res;
     res = create_sync_objects(app);
     return res;
 }
 
+static void cleanup_swapchain(Application* app) {
+    if (app->swapChainImageViews != NULL) {
+        for (uint32_t i = 0; i < app->swapChainImageViewCount; i++) {
+            if (app->swapChainImageViews[i] != VK_NULL_HANDLE) {
+                vkDestroyImageView(app->device, app->swapChainImageViews[i], NULL);
+            }
+        }
+        free(app->swapChainImageViews);
+        app->swapChainImageViews = NULL;
+    }
+    if (app->swapChainImages != NULL) {
+        free(app->swapChainImages);
+        app->swapChainImages = NULL;
+    }
+    if (app->swapChain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(app->device, app->swapChain, NULL);
+        app->swapChain = VK_NULL_HANDLE;
+    }
+}
+
+static VulkanResult recreate_swapchain(Application* app) {
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(app->window, &width, &height);
+    while (width == 0 || height == 0) {
+        glfwGetFramebufferSize(app->window, &width, &height);
+        glfwWaitEvents();
+    }
+    vkDeviceWaitIdle(app->device);
+    cleanup_swapchain(app);
+
+    create_swap_chain(app);
+    create_image_views(app);
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
 static VulkanResult draw_frame(Application* app) {
     uint32_t frameIndex = app->frameIndex;
+    
     VkResult result = vkWaitForFences(app->device, 1, &app->inFlightFences[frameIndex], VK_TRUE, UINT64_MAX);
     if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_FENCE_WAIT_FAILED, .vk_result = result};
     }
-    vkResetFences(app->device, 1, &app->inFlightFences[frameIndex]);
+    
     uint32_t imageIndex;
     result = vkAcquireNextImageKHR(
         app->device,
@@ -1378,9 +1636,16 @@ static VulkanResult draw_frame(Application* app) {
         VK_NULL_HANDLE,
         &imageIndex
     );
-    if (result != VK_SUCCESS) {
+    
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        recreate_swapchain(app);
+        return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = result};
+    } 
+    else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         return (VulkanResult){.status = VULKAN_ERROR_SWAPCHAIN_NEXT_IMAGE_FAILED, .vk_result = result};
     }
+
+    vkResetFences(app->device, 1, &app->inFlightFences[frameIndex]);
     record_command_buffer(app, imageIndex);
 
     VkPipelineStageFlags waitDestinationStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -1390,7 +1655,7 @@ static VulkanResult draw_frame(Application* app) {
     submitInfo.pWaitSemaphores = &app->presentCompleteSemaphores[frameIndex];
     submitInfo.pWaitDstStageMask = &waitDestinationStageMask;
     submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &app->commandBuffers[frameIndex];
+    submitInfo.pCommandBuffers = &app->graphicsCommandBuffers[frameIndex];
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = &app->renderFinishedSemaphores[frameIndex];
 
@@ -1403,19 +1668,24 @@ static VulkanResult draw_frame(Application* app) {
     if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_QUEUE_SUBMIT_FAILED, .vk_result = result};
     }
+
     VkPresentInfoKHR presentInfo = {0};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &app->renderFinishedSemaphores[frameIndex];;
+    presentInfo.pWaitSemaphores = &app->renderFinishedSemaphores[frameIndex];
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &app->swapChain;
     presentInfo.pImageIndices = &imageIndex;
     presentInfo.pResults = NULL;
 
     result = vkQueuePresentKHR(app->queues.graphics, &presentInfo);
-    if (result != VK_SUCCESS) {
+    
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || app->framebufferResized) {
+        recreate_swapchain(app);
+    } else if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_QUEUE_PRESENT_FAILED, .vk_result = result};
     }
+
     app->frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
@@ -1437,6 +1707,14 @@ static void cleanup(Application *app)
 {
     if (app->device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(app->device);
+    }
+
+    if (app->vertexBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(app->device, app->vertexBuffer, NULL);
+    }
+
+    if (app->vertexBufferMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(app->device, app->vertexBufferMemory, NULL);
     }
 
     if (app->presentCompleteSemaphores != NULL) {
@@ -1469,13 +1747,15 @@ static void cleanup(Application *app)
         app->inFlightFences = NULL;
     }
 
-    if (app->commandBuffers != NULL) {
-        free(app->commandBuffers);
-        app->commandBuffers = NULL;
+    if (app->graphicsCommandBuffers != NULL) {
+        free(app->graphicsCommandBuffers);
+        app->graphicsCommandBuffers = NULL;
     }
-
-    if (app->commandPool != VK_NULL_HANDLE) {
-        vkDestroyCommandPool(app->device, app->commandPool, NULL);
+    if (app->transferCommandPool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(app->device, app->transferCommandPool, NULL);
+    }
+    if (app->graphicsCommandPool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(app->device, app->graphicsCommandPool, NULL);
     }
     if (app->graphicsPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(app->device, app->graphicsPipeline, NULL);
@@ -1483,28 +1763,7 @@ static void cleanup(Application *app)
     if (app->pipelineLayout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(app->device, app->pipelineLayout, NULL);
     }
-    if (app->swapChainImageViews != NULL)
-    {
-        for (uint32_t i = 0; i < app->swapChainImageViewCount; i++)
-        {
-            if (app->swapChainImageViews[i] != VK_NULL_HANDLE)
-            {
-                vkDestroyImageView(app->device, app->swapChainImageViews[i], NULL);
-            }
-        }
-        free(app->swapChainImageViews);
-        app->swapChainImageViews = NULL;
-    }
-    if (app->swapChainImages != NULL)
-    {
-        free(app->swapChainImages);
-        app->swapChainImages = NULL;
-    }
-    if (app->swapChain != VK_NULL_HANDLE)
-    {
-        vkDestroySwapchainKHR(app->device, app->swapChain, NULL);
-        app->swapChain = VK_NULL_HANDLE;
-    }
+    cleanup_swapchain(app);
     if (app->device != VK_NULL_HANDLE)
     {
         vkDestroyDevice(app->device, NULL);
@@ -1547,8 +1806,8 @@ static VulkanResult app_run(Application *app)
     app->swapChainImageCount = 0;
     app->swapChainImages = NULL;
     app->frameIndex = 0;
-    app->commandBuffers = NULL;
-    app->commandBufferCount = 0;
+    app->graphicsCommandBuffers = NULL;
+    app->graphicsCommandBufferCount = 0;
     app->presentCompleteSemaphores = NULL;
     app->presentCompleteSemaphoreCount = 0;
     app->renderFinishedSemaphores = NULL;
