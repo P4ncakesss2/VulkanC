@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 4.2)
-project(VulkanC C)
+project(VulkanC C CXX)
 
 set(CMAKE_C_STANDARD 99)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 foreach(OUTPUT_TYPE RUNTIME ARCHIVE LIBRARY)
@@ -34,10 +35,18 @@ set(CGLM_BUILD_DOCS OFF CACHE INTERNAL "")
 set(CGLM_TEST OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(cglm)
 
+FetchContent_Declare(
+    vma
+    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+    GIT_TAG        v3.1.0 
+)
+FetchContent_MakeAvailable(vma)
+
 find_package(Vulkan REQUIRED)
 
 add_executable(VulkanC
         main.c
+        vma_impl.cpp
         tinyfiledialogs.c
         tinyfiledialogs.h
 )
@@ -46,4 +55,5 @@ target_link_libraries(VulkanC PRIVATE
         Vulkan::Vulkan
         glfw
         cglm
+        GPUOpen::VulkanMemoryAllocator
 )

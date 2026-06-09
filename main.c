@@ -1,6 +1,5 @@
 //TODO:
 // - ADD PROPER VSYNC SUPPORT
-// - ADD VMA (VULKAN MEMORY ALLOCATOR) (https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator)
 
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +10,7 @@
 #include "tinyfiledialogs.h"
 #include "cglm/cglm.h"
 #include <stdbool.h>
+#include "vk_mem_alloc.h"
 
 #define WIDTH 800
 #define HEIGHT 600
@@ -58,6 +58,8 @@ typedef struct Application
     VkSurfaceKHR surface;
     VkSwapchainKHR swapChain;
 
+    VmaAllocator allocator;
+
     uint32_t swapChainImageCount;
     VkImage *swapChainImages;
     VkSurfaceFormatKHR swapChainSurfaceFormat;
@@ -88,7 +90,7 @@ typedef struct Application
     bool framebufferResized;
 
     VkBuffer geometryBuffer;
-    VkDeviceMemory geometryBufferMemory;
+    VmaAllocation geometryBufferAllocation;
 
     uint32_t frameCounter;
     double lastSecond;
@@ -114,7 +116,7 @@ typedef enum VulkanStatus
     VULKAN_ERROR_PIPELINE_LAYOUT_CREATION_FAILED = -11,
     VULKAN_ERROR_PIPELINE_CREATION_FAILED = -12,
     VULKAN_ERROR_COMMAND_POOL_CREATION_FAILED = -13,
-    VULKAN_ERROR_COMMAND_BUFFER_CREATION_FAILED = -14,
+    VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED = -14,
     VULKAN_ERROR_COMMAND_BUFFER_FAILED_BEGIN = -15,
     VULKAN_ERROR_COMMAND_BUFFER_FAILED_END = -16,
     VULKAN_ERROR_FENCE_WAIT_FAILED = -17,
@@ -125,7 +127,8 @@ typedef enum VulkanStatus
     VULKAN_ERROR_MEMORY_TYPE_FIND_FAILED = -22,
     VULKAN_ERROR_MEMORY_ALLOCATION_FAILED = -23,
     VULKAN_ERROR_MEMORY_MAP_FAILED = -24,
-    VULKAN_ERROR_MEMORY_BIND_FAILED = -25
+    VULKAN_ERROR_MEMORY_BIND_FAILED = -25,
+    VULKAN_ERROR_VMA_ALLOCATOR_CREATION_FAILED = -26,
 } VulkanStatus;
 
 typedef struct VulkanResult
@@ -355,7 +358,7 @@ static VulkanResult create_instance(Application *app)
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
         .pEngineName = "No Engine",
         .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-        .apiVersion = VK_API_VERSION_1_4,
+        .apiVersion = VK_API_VERSION_1_3,
     };
 
 #ifdef ENABLE_VALIDATION_LAYERS
@@ -776,6 +779,17 @@ static VulkanResult create_logical_device(Application *app)
     app->queues.computeFamilyIndex = computeIndex;
     app->queues.transferFamilyIndex = transferIndex;
 
+    VmaAllocatorCreateInfo allocatorInfo = {
+        .physicalDevice = app->physicalDevice,
+        .device = app->device,
+        .instance = app->instance,
+        .vulkanApiVersion = VK_API_VERSION_1_3
+    };
+    result = vmaCreateAllocator(&allocatorInfo, &app->allocator);
+    if (result != VK_SUCCESS)
+    {
+        return (VulkanResult){.status = VULKAN_ERROR_VMA_ALLOCATOR_CREATION_FAILED, .vk_result = result};
+    }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -1220,7 +1234,7 @@ static VulkanResult create_command_buffer(Application* app) {
     };
     VkResult result = vkAllocateCommandBuffers(app->device, &allocInfo, app->graphicsCommandBuffers);
     if (result != VK_SUCCESS) {
-        return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_CREATION_FAILED, .vk_result = result};
+        return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED, .vk_result = result};
     }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
@@ -1413,19 +1427,19 @@ static VulkanResult create_sync_objects(Application* app) {
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
-static int find_memory_type(Application* app, uint32_t typeFilter, VkMemoryPropertyFlags properties, uint32_t* outIndex) {
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(app->physicalDevice, &memProperties);
-
-    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
-    {
-        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
-        {
-            *outIndex = i;
-            return true;
-        }
+static VulkanResult create_buffer(
+    Application* app, 
+    VkBufferCreateInfo* info, 
+    VmaAllocationCreateInfo* allocInfo, 
+    VkBuffer* outBuffer, 
+    VmaAllocation* outAllocation,
+    VmaAllocationInfo* outAllocInfo)
+{
+    VkResult result = vmaCreateBuffer(app->allocator, info, allocInfo, outBuffer, outAllocation, outAllocInfo);
+    if (result != VK_SUCCESS) {
+        return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
     }
-    return false;
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
 static VulkanResult copy_buffer(Application* app, VkBuffer* srcBuffer, VkBuffer* dstBuffer, VkDeviceSize size) {
@@ -1435,14 +1449,18 @@ static VulkanResult copy_buffer(Application* app, VkBuffer* srcBuffer, VkBuffer*
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
+    
+    VkCommandBuffer commandCopyBuffer;
+    VkResult allocResult = vkAllocateCommandBuffers(app->device, &allocInfo, &commandCopyBuffer);
+    if (allocResult != VK_SUCCESS) {
+        return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED, .vk_result = allocResult};
+    }
+
     VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .pNext = NULL,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        .pInheritanceInfo = NULL
     };
-    VkCommandBuffer commandCopyBuffer;
-    vkAllocateCommandBuffers(app->device, &allocInfo, &commandCopyBuffer);
+    
     vkBeginCommandBuffer(commandCopyBuffer, &beginInfo);
 
     VkBufferCopy copyRegion = {
@@ -1452,50 +1470,22 @@ static VulkanResult copy_buffer(Application* app, VkBuffer* srcBuffer, VkBuffer*
     };
     vkCmdCopyBuffer(commandCopyBuffer, *srcBuffer, *dstBuffer, 1, &copyRegion);
     vkEndCommandBuffer(commandCopyBuffer);
+
     VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .pNext = NULL,
-        .waitSemaphoreCount = 0,
-        .pWaitSemaphores = NULL,
-        .pWaitDstStageMask = NULL,
         .commandBufferCount = 1,
         .pCommandBuffers = &commandCopyBuffer,
-        .signalSemaphoreCount = 0,
-        .pSignalSemaphores = NULL
     };
 
     VkResult submitResult = vkQueueSubmit(app->queues.transfer, 1, &submitInfo, VK_NULL_HANDLE);
     if (submitResult != VK_SUCCESS) {
+        vkFreeCommandBuffers(app->device, app->transferCommandPool, 1, &commandCopyBuffer);
         return (VulkanResult){.status = VULKAN_ERROR_QUEUE_SUBMIT_FAILED, .vk_result = submitResult};
     }
+    
     vkQueueWaitIdle(app->queues.transfer);
-    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
-}
+    vkFreeCommandBuffers(app->device, app->transferCommandPool, 1, &commandCopyBuffer);
 
-static VulkanResult create_buffer(Application* app, VkBufferCreateInfo* info, VkMemoryPropertyFlags properties, VkBuffer* outBuffer, VkDeviceMemory* outMemory) {
-    VkResult result = vkCreateBuffer(app->device, info, NULL, outBuffer);
-    if (result != VK_SUCCESS) {
-        return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
-    }
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(app->device, *outBuffer, &memRequirements);
-    uint32_t memoryTypeIndex;
-    if (!find_memory_type(app, memRequirements.memoryTypeBits, properties, &memoryTypeIndex)) {
-        return (VulkanResult){.status = VULKAN_ERROR_MEMORY_TYPE_FIND_FAILED, .vk_result = VK_ERROR_UNKNOWN}; 
-    }
-    VkMemoryAllocateInfo memoryAllocateInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = memRequirements.size,
-        .memoryTypeIndex = memoryTypeIndex,
-    };
-    result = vkAllocateMemory(app->device, &memoryAllocateInfo, NULL, outMemory);
-    if (result != VK_SUCCESS) {
-        return (VulkanResult){.status = VULKAN_ERROR_MEMORY_ALLOCATION_FAILED, .vk_result = result};
-    }
-    result = vkBindBufferMemory(app->device, *outBuffer, *outMemory, 0);
-    if (result != VK_SUCCESS) {
-        return (VulkanResult){.status = VULKAN_ERROR_MEMORY_BIND_FAILED, .vk_result = result};
-    }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -1534,31 +1524,34 @@ static VulkanResult create_geometry_buffer(Application* app) {
     }
 
     VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-    VulkanResult res = create_buffer(app, &stagingInfo, 
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 
-        &stagingBuffer, &stagingBufferMemory);
+    VmaAllocation stagingAllocation;
+    VmaAllocationCreateInfo stagingAllocInfo = {
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | 
+                 VMA_ALLOCATION_CREATE_MAPPED_BIT
+    };
+    VmaAllocationInfo stagingAllocationInfo;
+    
+    VulkanResult res = create_buffer(app, &stagingInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, &stagingAllocationInfo);
     if (res.status != VULKAN_SUCCESS) return res;
 
-    void* dataStaging;
-    vkMapMemory(app->device, stagingBufferMemory, 0, totalSize, 0, &dataStaging);
-    memcpy(dataStaging, vertices, vertexSize);
-    memcpy((char*)dataStaging + vertexSize, indices, indexSize);
-    vkUnmapMemory(app->device, stagingBufferMemory);
+    // 2. Perform Memory Copy safely
+    memcpy(stagingAllocationInfo.pMappedData, vertices, vertexSize);
+    memcpy((char*)stagingAllocationInfo.pMappedData + vertexSize, indices, indexSize);
 
-    res = create_buffer(app, &deviceBufferInfo, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 
-        &app->geometryBuffer, &app->geometryBufferMemory);
+    VmaAllocationCreateInfo deviceAllocInfo = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE 
+    };
+    
+    res = create_buffer(app, &deviceBufferInfo, &deviceAllocInfo, &app->geometryBuffer, &app->geometryBufferAllocation, NULL);
     if (res.status != VULKAN_SUCCESS) {
-        vkDestroyBuffer(app->device, stagingBuffer, NULL);
-        vkFreeMemory(app->device, stagingBufferMemory, NULL);
+        vmaDestroyBuffer(app->allocator, stagingBuffer, stagingAllocation);
         return res;
     }
-
-    copy_buffer(app, &stagingBuffer, &app->geometryBuffer, totalSize);
-    vkDestroyBuffer(app->device, stagingBuffer, NULL);
-    vkFreeMemory(app->device, stagingBufferMemory, NULL);
-
-    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+    res = copy_buffer(app, &stagingBuffer, &app->geometryBuffer, totalSize);
+    vmaDestroyBuffer(app->allocator, stagingBuffer, stagingAllocation);
+    
+    return res;
 }
 
 static VulkanResult init_vulkan(Application *app)
@@ -1755,11 +1748,9 @@ static void cleanup(Application *app)
     }
 
     if (app->geometryBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(app->device, app->geometryBuffer, NULL);
-    }
-
-    if (app->geometryBufferMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(app->device, app->geometryBufferMemory, NULL);
+        vmaDestroyBuffer(app->allocator, app->geometryBuffer, app->geometryBufferAllocation);
+        app->geometryBuffer = VK_NULL_HANDLE;
+        app->geometryBufferAllocation = VK_NULL_HANDLE;
     }
 
     if (app->presentCompleteSemaphores != NULL) {
@@ -1799,6 +1790,9 @@ static void cleanup(Application *app)
         vkDestroyPipelineLayout(app->device, app->pipelineLayout, NULL);
     }
     cleanup_swapchain(app);
+    if (app->allocator != VK_NULL_HANDLE) {
+        vmaDestroyAllocator(app->allocator);
+    }
     if (app->device != VK_NULL_HANDLE)
     {
         vkDestroyDevice(app->device, NULL);
