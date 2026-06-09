@@ -630,6 +630,10 @@ VulkanResult vkContextInitializeHardware(VkContext* ctx, VkSurfaceKHR surface) {
 }
 
 VulkanResult vkContextCreate(VkContextCreateInfo* createInfo, VkContext* outCtx) {
+    if (outCtx->isInitialized) {
+        LOG_WARN("vkContextCreate called on an already initialized context!");
+        return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+    }
     outCtx->instance = VK_NULL_HANDLE;
     outCtx->physicalDevice = VK_NULL_HANDLE;
     outCtx->logicalDevice = VK_NULL_HANDLE;
@@ -668,6 +672,7 @@ VulkanResult vkContextCreate(VkContextCreateInfo* createInfo, VkContext* outCtx)
         LOG_INFO("Vulkan Context running fully headless.");
     }
     LOG_INFO("Vulkan context created successfully.");
+    outCtx->isInitialized = true;
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -692,4 +697,5 @@ void vkContextDestroy(VkContext* ctx) {
     if (ctx->presentationEnabled) {
         glfwTerminate();
     }
+    ctx->isInitialized = false;
 }

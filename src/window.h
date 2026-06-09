@@ -39,6 +39,7 @@ typedef struct VkWindow {
     
     uint32_t currentFrameIndex;
     VkFrameData frames[MAX_FRAMES_IN_FLIGHT];
+    bool isInitialized;
 } VkWindow;
 
 typedef struct VkWindowCreateInfo {

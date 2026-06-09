@@ -217,13 +217,33 @@ static void cleanup_swapchain(VkContext* ctx, VkWindow* window) {
 }
 
 VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo, VkWindow* outWindow) {
+    if (outWindow->isInitialized) {
+        LOG_WARN("vkWindowCreate called on an already initialized window!");
+        return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+    }
     if (!ctx->presentationEnabled) {
         LOG_ERROR("Cannot create a window! The VulkanContext was initialized with presentationEnabled = false.");
         return (VulkanResult){.status = VULKAN_ERROR_PRESENTATION_NOT_ENABLED, .vk_result = VK_ERROR_UNKNOWN};
     }
-
     outWindow->handle = NULL;
     outWindow->surface = VK_NULL_HANDLE;
+    outWindow->swapChainImageCount = 0;
+    outWindow->swapChainImages = NULL;
+    outWindow->swapChainImageViewCount = 0;
+    outWindow->swapChainImageViews = NULL;
+    outWindow->currentFrameIndex = 0;
+    
+    for(uint32_t i; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        outWindow->frames[i].graphicsPool = VK_NULL_HANDLE;
+        outWindow->frames[i].transferPool = VK_NULL_HANDLE;
+        outWindow->frames[i].computePool = VK_NULL_HANDLE;
+        outWindow->frames[i].graphicsCommandBuffer = VK_NULL_HANDLE;
+        outWindow->frames[i].transferCommandBuffer = VK_NULL_HANDLE;
+        outWindow->frames[i].computeCommandBuffer = VK_NULL_HANDLE;
+        outWindow->frames[i].presentSemaphore = VK_NULL_HANDLE;
+        outWindow->frames[i].renderSemaphore = VK_NULL_HANDLE;
+        outWindow->frames[i].renderFence = VK_NULL_HANDLE;
+    }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
@@ -267,6 +287,7 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
         vkWindowDestroy(ctx, outWindow);
         return result;
     }
+    outWindow->isInitialized = true;
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -294,4 +315,5 @@ void vkWindowDestroy(VkContext* ctx, VkWindow* window) {
         glfwDestroyWindow(window->handle);
         window->handle = NULL;
     }
+    window->isInitialized = false;
 }

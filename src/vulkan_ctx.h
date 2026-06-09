@@ -49,6 +49,7 @@ typedef struct VkContext {
 
     VKQueues queues;
     bool presentationEnabled;
+    bool isInitialized;
 } VkContext;
 
 typedef struct VkContextCreateInfo {
