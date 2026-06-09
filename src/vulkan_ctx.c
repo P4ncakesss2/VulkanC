@@ -615,6 +615,20 @@ static VulkanResult create_logical_device(VkContext* ctx) {
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
+static VulkanResult create_transfer_pool(VkContext* ctx) {
+    VkCommandPoolCreateInfo poolInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = NULL,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = ctx->queues.transferFamilyIndex
+    };
+    VkResult poolResult = vkCreateCommandPool(ctx->logicalDevice, &poolInfo, NULL, &ctx->transferPool);
+    if (poolResult != VK_SUCCESS) {
+        return (VulkanResult){.status = VULKAN_ERROR_COMMAND_POOL_CREATION_FAILED, .vk_result = poolResult};
+    }
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
 VulkanResult vkContextInitializeHardware(VkContext* ctx, VkSurfaceKHR surface) {
     VulkanResult res = pick_physical_device(ctx, surface);
     if (res.status != VULKAN_SUCCESS) {
@@ -624,6 +638,11 @@ VulkanResult vkContextInitializeHardware(VkContext* ctx, VkSurfaceKHR surface) {
     res = create_logical_device(ctx);
     if (res.status != VULKAN_SUCCESS) {
         LOG_ERROR("Logical device creation failed during hardware initialization. Status: %i", res.status);
+        return res;
+    }
+    res = create_transfer_pool(ctx);
+    if (res.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Logical device creation failed transfer command pool creation failed.");
         return res;
     }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
@@ -640,6 +659,7 @@ VulkanResult vkContextCreate(VkContextCreateInfo* createInfo, VkContext* outCtx)
     outCtx->debugMessenger = VK_NULL_HANDLE;
     outCtx->allocator = VK_NULL_HANDLE;
     outCtx->presentationEnabled = createInfo->enablePresentation;
+    outCtx->transferPool = VK_NULL_HANDLE;
 
     if (createInfo->enablePresentation) {
         if (!glfwInit()) {
@@ -678,6 +698,10 @@ VulkanResult vkContextCreate(VkContextCreateInfo* createInfo, VkContext* outCtx)
 
 void vkContextDestroy(VkContext* ctx) {
     if (ctx == NULL) return;
+    if (ctx->transferPool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(ctx->logicalDevice, ctx->transferPool, NULL);
+        ctx->transferPool = VK_NULL_HANDLE;
+    }
     if (ctx->allocator != VK_NULL_HANDLE) {
         vmaDestroyAllocator(ctx->allocator);
         ctx->allocator = VK_NULL_HANDLE;
