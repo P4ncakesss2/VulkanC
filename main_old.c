@@ -55,6 +55,7 @@ typedef struct Application
     VkDevice device;
     VulkanQueues queues;
     VkDebugUtilsMessengerEXT debugMessenger;
+
     VkSurfaceKHR surface;
     VkSwapchainKHR swapChain;
 
@@ -602,7 +603,7 @@ static VulkanResult pick_physical_device(Application *app)
     if (result != VK_SUCCESS)
     {
         free(physical_devices);
-        return (VulkanResult){.status = VULKAN_ERROR_INIT_FAILED, .vk_result = result};
+        return (VulkanResult){.status = VULKAN_STATUS_NO_COMPATIBLE_GPU, .vk_result = result};
     }
 
     uint32_t highest_score = 0;
