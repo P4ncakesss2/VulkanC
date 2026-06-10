@@ -399,9 +399,9 @@ VulkanResult record_command_buffer(VkWindow* window, uint32_t imageIndex) {
 
 static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
     uint32_t frameIndex = window->frameIndex;
-    VkFrameData framedata = window->frames[frameIndex];
+    VkFrameData* framedata = &window->frames[frameIndex];
 
-    VkResult result = vkWaitForFences(ctx->logicalDevice, 1, &framedata.renderFence, VK_TRUE, UINT64_MAX);
+    VkResult result = vkWaitForFences(ctx->logicalDevice, 1, &framedata->renderFence, VK_TRUE, UINT64_MAX);
     if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_FENCE_WAIT_FAILED, .vk_result = result};
     }
@@ -411,7 +411,7 @@ static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
         ctx->logicalDevice,
         window->swapChain,
         UINT64_MAX,
-        framedata.presentSemaphore,
+        framedata->presentSemaphore,
         VK_NULL_HANDLE,
         &imageIndex
     );
@@ -424,18 +424,18 @@ static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
         return (VulkanResult){.status = VULKAN_ERROR_SWAPCHAIN_NEXT_IMAGE_FAILED, .vk_result = result};
     }
 
-    vkResetFences(ctx->logicalDevice, 1, &framedata.renderFence);
-    vkResetCommandPool(ctx->logicalDevice, framedata.graphicsPool, 0);
+    vkResetFences(ctx->logicalDevice, 1, &framedata->renderFence);
+    vkResetCommandPool(ctx->logicalDevice, framedata->graphicsPool, 0);
     record_command_buffer(window, imageIndex);
 
     VkPipelineStageFlags waitDestinationStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submitInfo = {0};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = &framedata.presentSemaphore;
+    submitInfo.pWaitSemaphores = &framedata->presentSemaphore;
     submitInfo.pWaitDstStageMask = &waitDestinationStageMask;
     submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &framedata.graphicsCommandBuffer;
+    submitInfo.pCommandBuffers = &framedata->graphicsCommandBuffer;
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = &window->renderSemaphores[imageIndex];
 
@@ -443,7 +443,7 @@ static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
         ctx->queues.graphics,
         1,
         &submitInfo,
-        framedata.renderFence
+        framedata->renderFence
     );
     if (result != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_QUEUE_SUBMIT_FAILED, .vk_result = result};
@@ -466,7 +466,6 @@ static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
         return (VulkanResult){.status = VULKAN_ERROR_QUEUE_PRESENT_FAILED, .vk_result = result};
     }
 
-    window->frames[frameIndex] = framedata;
     window->frameIndex = (window->frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
@@ -513,13 +512,8 @@ int main() {
     }
     
     vkDeviceWaitIdle(context.logicalDevice);
-    if (app.graphicsPipeline != NULL) {
-        vkDestroyPipeline(context.logicalDevice, app.graphicsPipeline, NULL);
-        app.graphicsPipeline = NULL;
-    }
-    if (app.pipelineLayout != NULL) {
-        vkDestroyPipelineLayout(context.logicalDevice, app.pipelineLayout, NULL);
-    }
+    vkDestroyPipeline(context.logicalDevice, app.graphicsPipeline, NULL);
+    vkDestroyPipelineLayout(context.logicalDevice, app.pipelineLayout, NULL);
     vkWindowDestroy(&context, &window);
     vkContextDestroy(&context);
 
