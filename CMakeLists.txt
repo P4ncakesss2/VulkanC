@@ -44,10 +44,9 @@ FetchContent_MakeAvailable(vma)
 
 find_package(Vulkan REQUIRED)
 
-file(GLOB_RECURSE SRC_FILES 
+file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
 )
 
 add_executable(VulkanC ${SRC_FILES})

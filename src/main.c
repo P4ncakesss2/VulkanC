@@ -1,3 +1,4 @@
+#include "mesh.h"
 #include "vulkan_ctx.h"
 #include "window.h"
 #include <stdio.h>
@@ -5,11 +6,6 @@
 #include <stdlib.h>
 #include "render_types.h"
 #include "logger.h"
-
-typedef struct Vertex {
-    vec3 position;
-    vec3 color;
-} Vertex;
 
 static Vertex boxVertices[] = {
     {{-0.5f, -0.5f,  0.5f}, {1.0f, 0.0f, 0.0f}},
@@ -31,123 +27,15 @@ static uint32_t boxIndices[] = {
     4, 5, 1,  1, 0, 4,  // bottom
 };
 
-typedef struct GeoBuffer {
-    VkBuffer      buffer;
-    VmaAllocation allocation;
-    uint32_t      vertexCount;
-    uint32_t      indexCount;
-    VkDeviceSize  indexOffset;
-} GeoBuffer;
-
 typedef struct App {
     VkPipelineLayout      pipelineLayout;
     VkPipeline            graphicsPipeline;
     VkDescriptorSetLayout globalSetLayout;
     VkDescriptorPool      descriptorPool;
-    GeoBuffer             geo;
+    VkMesh             mesh;
 } App;
 
 static App app;
-
-static VulkanResult create_geo_buffer(VkContext* ctx, GeoBuffer* out,
-    Vertex* vertices, uint32_t vertexCount,
-    uint32_t* indices, uint32_t indexCount)
-{
-    VkDeviceSize vertexSize  = sizeof(Vertex) * vertexCount;
-    VkDeviceSize indexSize   = sizeof(uint32_t) * indexCount;
-    VkDeviceSize totalSize   = vertexSize + indexSize;
-
-    // staging buffer
-    VkBufferCreateInfo stagingBufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size  = totalSize,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-    };
-    VmaAllocationCreateInfo stagingAllocInfo = {
-        .usage = VMA_MEMORY_USAGE_AUTO,
-        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                 VMA_ALLOCATION_CREATE_MAPPED_BIT,
-    };
-    VkBuffer      stagingBuffer;
-    VmaAllocation stagingAllocation;
-    VmaAllocationInfo stagingAllocResult;
-    VkResult result = vmaCreateBuffer(ctx->allocator, &stagingBufferInfo, &stagingAllocInfo,
-        &stagingBuffer, &stagingAllocation, &stagingAllocResult);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vmaCreateBuffer failed for staging buffer. VkResult: %i", result);
-        return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
-    }
-
-    memcpy(stagingAllocResult.pMappedData, vertices, vertexSize);
-    memcpy((char*)stagingAllocResult.pMappedData + vertexSize, indices, indexSize);
-
-    // device-local buffer
-    VkBufferCreateInfo deviceBufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size  = totalSize,
-        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT  |
-                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-    };
-    VmaAllocationCreateInfo deviceAllocInfo = {
-        .usage = VMA_MEMORY_USAGE_AUTO,
-        .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
-    };
-    result = vmaCreateBuffer(ctx->allocator, &deviceBufferInfo, &deviceAllocInfo,
-        &out->buffer, &out->allocation, NULL);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vmaCreateBuffer failed for device buffer. VkResult: %i", result);
-        vmaDestroyBuffer(ctx->allocator, stagingBuffer, stagingAllocation);
-        return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
-    }
-
-    // record and submit transfer
-    VkCommandBufferAllocateInfo cmdAllocInfo = {
-        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool        = ctx->transferPool,
-        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
-    };
-    VkCommandBuffer cmd;
-    result = vkAllocateCommandBuffers(ctx->logicalDevice, &cmdAllocInfo, &cmd);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vkAllocateCommandBuffers failed for transfer. VkResult: %i", result);
-        vmaDestroyBuffer(ctx->allocator, stagingBuffer, stagingAllocation);
-        vmaDestroyBuffer(ctx->allocator, out->buffer, out->allocation);
-        return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED, .vk_result = result};
-    }
-
-    VkCommandBufferBeginInfo beginInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    };
-    vkBeginCommandBuffer(cmd, &beginInfo);
-
-    VkBufferCopy region = {
-        .srcOffset = 0,
-        .dstOffset = 0,
-        .size      = totalSize,
-    };
-    vkCmdCopyBuffer(cmd, stagingBuffer, out->buffer, 1, &region);
-    vkEndCommandBuffer(cmd);
-
-    VkSubmitInfo submitInfo = {
-        .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers    = &cmd,
-    };
-    vkQueueSubmit(ctx->queues.transfer, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(ctx->queues.transfer);
-
-    vkFreeCommandBuffers(ctx->logicalDevice, ctx->transferPool, 1, &cmd);
-    vmaDestroyBuffer(ctx->allocator, stagingBuffer, stagingAllocation);
-
-    out->vertexCount = vertexCount;
-    out->indexCount  = indexCount;
-    out->indexOffset = vertexSize;
-
-    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
-}
 
 char* read_file(const char* filename, size_t* outSize) {
     FILE* file = fopen(filename, "rb");
@@ -337,26 +225,9 @@ static VulkanResult create_graphics_pipeline(VkContext* ctx, VkWindow* window) {
 
     VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
-    VkVertexInputBindingDescription bindingDesc = {
-        .binding   = 0,
-        .stride    = sizeof(Vertex),
-        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-    };
-
-    VkVertexInputAttributeDescription attrDescs[2] = {
-        {
-            .location = 0,
-            .binding  = 0,
-            .format   = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset   = offsetof(Vertex, position),
-        },
-        {
-            .location = 1,
-            .binding  = 0,
-            .format   = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset   = offsetof(Vertex, color),
-        },
-    };
+    VkVertexInputBindingDescription bindingDesc = vkVertexGetBindingDescription();
+    VkVertexInputAttributeDescription attrDescs[2];
+    vkVertexGetAttributeDescription(attrDescs);
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -677,9 +548,6 @@ VulkanResult record_command_buffer(VkWindow* window, uint32_t imageIndex) {
         .extent = window->swapChainExtent
     };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &app.geo.buffer, &offset);
-    vkCmdBindIndexBuffer(cmd, app.geo.buffer, app.geo.indexOffset, VK_INDEX_TYPE_UINT32);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
         app.pipelineLayout, 0, 1,
@@ -689,8 +557,9 @@ VulkanResult record_command_buffer(VkWindow* window, uint32_t imageIndex) {
     uint32_t objectIndex = 0;
     vkCmdPushConstants(cmd, app.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
         0, sizeof(uint32_t), &objectIndex);
+    
+    vkMeshBind(&app.mesh, cmd);
 
-    vkCmdDrawIndexed(cmd, app.geo.indexCount, 1, 0, 0, 0);
     vkCmdEndRendering(cmd);
 
     transition_image_layout(
@@ -840,6 +709,16 @@ int main() {
         // blah blah blah
     }
 
+    VkMeshCreateInfo meshInfo = {
+        .vertexArray = boxVertices,
+        .indexArray = boxIndices,
+        .vertexCount = sizeof(boxVertices) / sizeof(boxVertices[0]),
+        .indexCount = sizeof(boxIndices) / sizeof(boxIndices[0]),
+    };
+
+    result = vkMeshCreate(&context,&meshInfo, &app.mesh);
+    if (result.status != VULKAN_SUCCESS) { }
+
     result = create_global_descriptor_layout(&context);
     if (result.status != VULKAN_SUCCESS) { }
 
@@ -847,11 +726,6 @@ int main() {
     if (result.status != VULKAN_SUCCESS) { }
 
     result = create_frame_descriptors(&context, &window);
-    if (result.status != VULKAN_SUCCESS) { }
-
-    result = create_geo_buffer(&context, &app.geo,
-    boxVertices,  8,
-    boxIndices,  36);
     if (result.status != VULKAN_SUCCESS) { }
 
     result = create_graphics_pipeline(&context, &window);
@@ -868,11 +742,12 @@ int main() {
     }
     
     vkDeviceWaitIdle(context.logicalDevice);
-    vmaDestroyBuffer(context.allocator, app.geo.buffer, app.geo.allocation);
     vkDestroyDescriptorPool(context.logicalDevice, app.descriptorPool, NULL);
     vkDestroyDescriptorSetLayout(context.logicalDevice, app.globalSetLayout, NULL);
     vkDestroyPipeline(context.logicalDevice, app.graphicsPipeline, NULL);
     vkDestroyPipelineLayout(context.logicalDevice, app.pipelineLayout, NULL);
+
+    vkMeshDestroy(&context, &app.mesh);
     vkWindowDestroy(&context, &window);
     vkContextDestroy(&context);
 
