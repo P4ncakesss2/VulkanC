@@ -20,7 +20,6 @@ typedef struct VkFrameData {
     VkCommandBuffer computeCommandBuffer;
     
     VkSemaphore presentSemaphore;
-    VkSemaphore renderSemaphore;
     VkFence renderFence;
 } VkFrameData;
 
@@ -36,10 +35,13 @@ typedef struct VkWindow {
     
     VkSurfaceFormatKHR swapChainSurfaceFormat;
     VkExtent2D swapChainExtent;
+
+    VkSemaphore* renderSemaphores;
     
-    uint32_t currentFrameIndex;
+    uint32_t frameIndex;
     VkFrameData frames[MAX_FRAMES_IN_FLIGHT];
     bool isInitialized;
+    bool framebufferResized;
 } VkWindow;
 
 typedef struct VkWindowCreateInfo {

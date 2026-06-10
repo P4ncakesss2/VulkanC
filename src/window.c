@@ -196,6 +196,53 @@ static VulkanResult create_image_views(VkContext* ctx, VkWindow* window)
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
+static VulkanResult create_frame_data(VkContext* ctx, VkWindow* window) {
+    VkSemaphoreCreateInfo semaphoreInfo = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+    };
+    VkFenceCreateInfo fenceInfo = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT
+    };
+    for (int i=0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkCommandPoolCreateInfo graphicsPoolInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = 0,
+        .queueFamilyIndex = ctx->queues.graphicsFamilyIndex
+        };
+        vkCreateCommandPool(ctx->logicalDevice, &graphicsPoolInfo, NULL, &window->frames[i].graphicsPool);
+
+        VkCommandPoolCreateInfo computePoolInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = 0,
+            .queueFamilyIndex = ctx->queues.computeFamilyIndex
+        };
+        vkCreateCommandPool(ctx->logicalDevice, &computePoolInfo, NULL, &window->frames[i].computePool);
+        VkCommandPoolCreateInfo transferPoolInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = 0,
+            .queueFamilyIndex = ctx->queues.transferFamilyIndex
+        };
+        vkCreateCommandPool(ctx->logicalDevice, &transferPoolInfo, NULL, &window->frames[i].transferPool);
+    
+        VkCommandBufferAllocateInfo allocInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = window->frames[i].graphicsPool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1
+        };
+        vkAllocateCommandBuffers(ctx->logicalDevice, &allocInfo, &window->frames[i].graphicsCommandBuffer);
+        allocInfo.commandPool = window->frames[i].transferPool;
+        vkAllocateCommandBuffers(ctx->logicalDevice, &allocInfo, &window->frames[i].transferCommandBuffer);
+        allocInfo.commandPool = window->frames[i].computePool;
+        vkAllocateCommandBuffers(ctx->logicalDevice, &allocInfo, &window->frames[i].computeCommandBuffer);
+        
+        vkCreateSemaphore(ctx->logicalDevice, &semaphoreInfo, NULL, &window->frames[i].presentSemaphore);
+        vkCreateFence(ctx->logicalDevice, &fenceInfo, NULL, &window->frames[i].renderFence);
+    }
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
 static void cleanup_swapchain(VkContext* ctx, VkWindow* window) {
     if (window->swapChainImageViews != NULL) {
         for (uint32_t i = 0; i < window->swapChainImageViewCount; i++) {
@@ -216,6 +263,12 @@ static void cleanup_swapchain(VkContext* ctx, VkWindow* window) {
     }
 }
 
+static void framebufferResizeCallback(GLFWwindow* handle, int width, int height)
+{
+    VkWindow* window = (VkWindow*)glfwGetWindowUserPointer(handle);
+    window->framebufferResized = true;
+}
+
 VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo, VkWindow* outWindow) {
     if (outWindow->isInitialized) {
         LOG_WARN("vkWindowCreate called on an already initialized window!");
@@ -231,9 +284,12 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
     outWindow->swapChainImages = NULL;
     outWindow->swapChainImageViewCount = 0;
     outWindow->swapChainImageViews = NULL;
-    outWindow->currentFrameIndex = 0;
+    outWindow->frameIndex = 0;
+    outWindow->framebufferResized = false;
+    outWindow->isInitialized = false;
+    outWindow->renderSemaphores = NULL;
     
-    for(uint32_t i; i < MAX_FRAMES_IN_FLIGHT; i++) {
+    for(uint32_t i=0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         outWindow->frames[i].graphicsPool = VK_NULL_HANDLE;
         outWindow->frames[i].transferPool = VK_NULL_HANDLE;
         outWindow->frames[i].computePool = VK_NULL_HANDLE;
@@ -241,7 +297,6 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
         outWindow->frames[i].transferCommandBuffer = VK_NULL_HANDLE;
         outWindow->frames[i].computeCommandBuffer = VK_NULL_HANDLE;
         outWindow->frames[i].presentSemaphore = VK_NULL_HANDLE;
-        outWindow->frames[i].renderSemaphore = VK_NULL_HANDLE;
         outWindow->frames[i].renderFence = VK_NULL_HANDLE;
     }
 
@@ -261,6 +316,7 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
     }
     
     glfwSetWindowUserPointer(outWindow->handle, outWindow);
+    glfwSetFramebufferSizeCallback(outWindow->handle, framebufferResizeCallback);
     
     VulkanResult result = create_surface(ctx, outWindow);
     if (result.status != VULKAN_SUCCESS) {
@@ -287,6 +343,19 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
         vkWindowDestroy(ctx, outWindow);
         return result;
     }
+
+    outWindow->renderSemaphores = malloc(outWindow->swapChainImageCount * sizeof(VkSemaphore));
+    VkSemaphoreCreateInfo semInfo = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    for (uint32_t i = 0; i < outWindow->swapChainImageCount; i++) {
+        vkCreateSemaphore(ctx->logicalDevice, &semInfo, NULL, &outWindow->renderSemaphores[i]);
+    }
+
+    result = create_frame_data(ctx, outWindow);
+    if (result.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Vulkan frame data creation failed.");
+        vkWindowDestroy(ctx, outWindow);
+        return result;
+    }
     outWindow->isInitialized = true;
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
@@ -305,6 +374,34 @@ void vkWindowDestroy(VkContext* ctx, VkWindow* window) {
     if (window == NULL) return;
 
     cleanup_swapchain(ctx, window);
+
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (window->frames[i].presentSemaphore != VK_NULL_HANDLE) {
+            vkDestroySemaphore(ctx->logicalDevice, window->frames[i].presentSemaphore, NULL);
+        }
+        if (window->frames[i].renderFence != VK_NULL_HANDLE) {
+            vkDestroyFence(ctx->logicalDevice, window->frames[i].renderFence, NULL);
+        }
+
+        if (window->frames[i].graphicsPool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(ctx->logicalDevice, window->frames[i].graphicsPool, NULL);
+        }
+        if (window->frames[i].computePool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(ctx->logicalDevice, window->frames[i].computePool, NULL);
+        }
+        if (window->frames[i].transferPool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(ctx->logicalDevice, window->frames[i].transferPool, NULL);
+        }
+    }
+
+    if (window->renderSemaphores != NULL) {
+        for (uint32_t i = 0; i < window->swapChainImageCount; i++) {
+            if (window->renderSemaphores[i] != VK_NULL_HANDLE)
+                vkDestroySemaphore(ctx->logicalDevice, window->renderSemaphores[i], NULL);
+        }
+        free(window->renderSemaphores);
+        window->renderSemaphores = NULL;
+    }
 
     if (window->surface != VK_NULL_HANDLE) {
         vkDestroySurfaceKHR(ctx->instance, window->surface, NULL);
