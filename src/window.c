@@ -1,11 +1,13 @@
 #include "window.h"
 #include "logger.h"
 #include <stdlib.h>
+#include "render_types.h"
 
-static VulkanResult create_surface(VkContext *ctx, VkWindow* window)  {
-    if (glfwCreateWindowSurface(ctx->instance, window->handle, NULL, &window->surface) != 0)
-    {
-        return (VulkanResult){.status = VULKAN_ERROR_SURFACE_CREATION_FAILED, .vk_result = VK_ERROR_UNKNOWN};
+static VulkanResult create_surface(VkContext *ctx, VkWindow* window) {
+    VkResult result = glfwCreateWindowSurface(ctx->instance, window->handle, NULL, &window->surface);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("glfwCreateWindowSurface failed. VkResult: %i", result);
+        return (VulkanResult){.status = VULKAN_ERROR_SURFACE_CREATION_FAILED, .vk_result = result};
     }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
@@ -196,6 +198,24 @@ static VulkanResult create_image_views(VkContext* ctx, VkWindow* window)
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
+static VulkanResult create_render_semaphores(VkContext* ctx, VkWindow* window) {
+    window->renderSemaphores = malloc(window->swapChainImageCount * sizeof(VkSemaphore));
+    if (window->renderSemaphores == NULL) {
+        LOG_ERROR("Out of memory allocating render semaphores.");
+        return (VulkanResult){.status = VULKAN_ERROR_OUT_OF_MEMORY, .vk_result = VK_SUCCESS};
+    }
+    VkSemaphoreCreateInfo semInfo = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    for (uint32_t i = 0; i < window->swapChainImageCount; i++) {
+        window->renderSemaphores[i] = VK_NULL_HANDLE;
+        VkResult result = vkCreateSemaphore(ctx->logicalDevice, &semInfo, NULL, &window->renderSemaphores[i]);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vkCreateSemaphore failed for render semaphore %u. VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_SEMAPHORE_CREATION_FAILED, .vk_result = result};
+        }
+    }
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
 static VulkanResult create_frame_data(VkContext* ctx, VkWindow* window) {
     VkSemaphoreCreateInfo semaphoreInfo = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -204,46 +224,163 @@ static VulkanResult create_frame_data(VkContext* ctx, VkWindow* window) {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT
     };
-    for (int i=0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkCommandPoolCreateInfo graphicsPoolInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags = 0,
-        .queueFamilyIndex = ctx->queues.graphicsFamilyIndex
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = 0,
+            .queueFamilyIndex = ctx->queues.graphicsFamilyIndex
         };
-        vkCreateCommandPool(ctx->logicalDevice, &graphicsPoolInfo, NULL, &window->frames[i].graphicsPool);
+        VkResult result = vkCreateCommandPool(ctx->logicalDevice, &graphicsPoolInfo, NULL, &window->frames[i].graphicsPool);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vkCreateCommandPool failed for graphics pool (frame %u). VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_COMMAND_POOL_CREATION_FAILED, .vk_result = result};
+        }
 
         VkCommandPoolCreateInfo computePoolInfo = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .flags = 0,
             .queueFamilyIndex = ctx->queues.computeFamilyIndex
         };
-        vkCreateCommandPool(ctx->logicalDevice, &computePoolInfo, NULL, &window->frames[i].computePool);
-        VkCommandPoolCreateInfo transferPoolInfo = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-            .flags = 0,
-            .queueFamilyIndex = ctx->queues.transferFamilyIndex
-        };
-        vkCreateCommandPool(ctx->logicalDevice, &transferPoolInfo, NULL, &window->frames[i].transferPool);
-    
+        result = vkCreateCommandPool(ctx->logicalDevice, &computePoolInfo, NULL, &window->frames[i].computePool);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vkCreateCommandPool failed for compute pool (frame %u). VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_COMMAND_POOL_CREATION_FAILED, .vk_result = result};
+        }
+
         VkCommandBufferAllocateInfo allocInfo = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = window->frames[i].graphicsPool,
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1
         };
-        vkAllocateCommandBuffers(ctx->logicalDevice, &allocInfo, &window->frames[i].graphicsCommandBuffer);
-        allocInfo.commandPool = window->frames[i].transferPool;
-        vkAllocateCommandBuffers(ctx->logicalDevice, &allocInfo, &window->frames[i].transferCommandBuffer);
+        result = vkAllocateCommandBuffers(ctx->logicalDevice, &allocInfo, &window->frames[i].graphicsCommandBuffer);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vkAllocateCommandBuffers failed for graphics command buffer (frame %u). VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED, .vk_result = result};
+        }
         allocInfo.commandPool = window->frames[i].computePool;
-        vkAllocateCommandBuffers(ctx->logicalDevice, &allocInfo, &window->frames[i].computeCommandBuffer);
-        
-        vkCreateSemaphore(ctx->logicalDevice, &semaphoreInfo, NULL, &window->frames[i].presentSemaphore);
-        vkCreateFence(ctx->logicalDevice, &fenceInfo, NULL, &window->frames[i].renderFence);
+        result = vkAllocateCommandBuffers(ctx->logicalDevice, &allocInfo, &window->frames[i].computeCommandBuffer);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vkAllocateCommandBuffers failed for compute command buffer (frame %u). VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED, .vk_result = result};
+        }
+
+        result = vkCreateSemaphore(ctx->logicalDevice, &semaphoreInfo, NULL, &window->frames[i].presentSemaphore);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vkCreateSemaphore failed for present semaphore (frame %u). VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_SEMAPHORE_CREATION_FAILED, .vk_result = result};
+        }
+
+        result = vkCreateFence(ctx->logicalDevice, &fenceInfo, NULL, &window->frames[i].renderFence);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vkCreateFence failed for render fence (frame %u). VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_FENCE_CREATION_FAILED, .vk_result = result};
+        }
+
+        VkBufferCreateInfo uboInfo = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size  = sizeof(GlobalUBO),
+            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        };
+        VmaAllocationCreateInfo uboAllocInfo = {
+            .usage = VMA_MEMORY_USAGE_AUTO,
+            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                     VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        };
+        VmaAllocationInfo uboAllocResult;
+        result = vmaCreateBuffer(ctx->allocator, &uboInfo, &uboAllocInfo,
+            &window->frames[i].uniformBuffer,
+            &window->frames[i].uniformAllocation,
+            &uboAllocResult);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vmaCreateBuffer failed for uniform buffer (frame %u). VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
+        }
+        window->frames[i].uniformMapped = uboAllocResult.pMappedData;
+
+        VkBufferCreateInfo ssboInfo = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size  = sizeof(ObjectSSBO),
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        };
+        VmaAllocationCreateInfo ssboAllocInfo = {
+            .usage = VMA_MEMORY_USAGE_AUTO,
+            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                     VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        };
+        VmaAllocationInfo ssboAllocResult;
+        result = vmaCreateBuffer(ctx->allocator, &ssboInfo, &ssboAllocInfo,
+            &window->frames[i].objectBuffer,
+            &window->frames[i].objectAllocation,
+            &ssboAllocResult);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vmaCreateBuffer failed for object SSBO (frame %u). VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
+        }
+        window->frames[i].objectMapped = ssboAllocResult.pMappedData;
+    }
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
+static VulkanResult create_depth_image(VkContext* ctx, VkWindow* window) {
+    VkImageCreateInfo imageInfo = {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType     = VK_IMAGE_TYPE_2D,
+        .format        = VK_FORMAT_D32_SFLOAT,
+        .extent        = {
+            .width     = window->swapChainExtent.width,
+            .height    = window->swapChainExtent.height,
+            .depth     = 1,
+        },
+        .mipLevels     = 1,
+        .arrayLayers   = 1,
+        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .tiling        = VK_IMAGE_TILING_OPTIMAL,
+        .usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    VmaAllocationCreateInfo allocInfo = {
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+    };
+    VkResult result = vmaCreateImage(ctx->allocator, &imageInfo, &allocInfo,
+        &window->depthImage, &window->depthAllocation, NULL);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("vmaCreateImage failed for depth image. VkResult: %i", result);
+        return (VulkanResult){.status = VULKAN_ERROR_IMAGE_CREATION_FAILED, .vk_result = result};
+    }
+
+    VkImageViewCreateInfo viewInfo = {
+        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image            = window->depthImage,
+        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+        .format           = VK_FORMAT_D32_SFLOAT,
+        .subresourceRange = {
+            .aspectMask   = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0,
+            .levelCount   = 1,
+            .baseArrayLayer = 0,
+            .layerCount   = 1,
+        },
+    };
+    result = vkCreateImageView(ctx->logicalDevice, &viewInfo, NULL, &window->depthImageView);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("vkCreateImageView failed for depth image. VkResult: %i", result);
+        return (VulkanResult){.status = VULKAN_ERROR_IMAGE_VIEW_CREATION_FAILED, .vk_result = result};
     }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
 static void cleanup_swapchain(VkContext* ctx, VkWindow* window) {
+    if (window->depthImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(ctx->logicalDevice, window->depthImageView, NULL);
+        window->depthImageView = VK_NULL_HANDLE;
+    }
+    if (window->depthImage != VK_NULL_HANDLE) {
+        vmaDestroyImage(ctx->allocator, window->depthImage, window->depthAllocation);
+        window->depthImage     = VK_NULL_HANDLE;
+        window->depthAllocation = VK_NULL_HANDLE;
+    }
     if (window->swapChainImageViews != NULL) {
         for (uint32_t i = 0; i < window->swapChainImageViewCount; i++) {
             if (window->swapChainImageViews[i] != VK_NULL_HANDLE) {
@@ -261,6 +398,54 @@ static void cleanup_swapchain(VkContext* ctx, VkWindow* window) {
         vkDestroySwapchainKHR(ctx->logicalDevice, window->swapChain, NULL);
         window->swapChain = VK_NULL_HANDLE;
     }
+}
+
+
+VulkanResult vkWindowRecreateSwapchain(VkContext* ctx, VkWindow* window) {
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(window->handle, &width, &height);
+    while (width == 0 || height == 0) {
+        glfwGetFramebufferSize(window->handle, &width, &height);
+        glfwWaitEvents();
+    }
+    vkDeviceWaitIdle(ctx->logicalDevice);
+
+    if (window->renderSemaphores != NULL) {
+        for (uint32_t i = 0; i < window->swapChainImageCount; i++) {
+            if (window->renderSemaphores[i] != VK_NULL_HANDLE)
+                vkDestroySemaphore(ctx->logicalDevice, window->renderSemaphores[i], NULL);
+        }
+        free(window->renderSemaphores);
+        window->renderSemaphores = NULL;
+    }
+
+    VkSwapchainKHR oldSwapchain = window->swapChain;
+    window->swapChain = VK_NULL_HANDLE;
+    cleanup_swapchain(ctx, window);
+
+    VulkanResult result = create_swapchain(ctx, window, oldSwapchain);
+    if (result.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Swapchain recreation failed. Status: %i", result.status);
+        return result;
+    }
+    result = create_image_views(ctx, window);
+    if (result.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Image view recreation failed. Status: %i", result.status);
+        return result;
+    }
+    result = create_depth_image(ctx, window);
+    if (result.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Depth image creation failed.");
+        vkWindowDestroy(ctx, window);
+        return result;
+    }
+    result = create_render_semaphores(ctx, window);
+    if (result.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Render semaphore recreation failed. Status: %i", result.status);
+        return result;
+    }
+    window->framebufferResized = false;
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
 static void framebufferResizeCallback(GLFWwindow* handle, int width, int height)
@@ -288,20 +473,28 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
     outWindow->framebufferResized = false;
     outWindow->isInitialized = false;
     outWindow->renderSemaphores = NULL;
+
+    outWindow->depthImage     = VK_NULL_HANDLE;
+    outWindow->depthImageView = VK_NULL_HANDLE;
+    outWindow->depthAllocation = VK_NULL_HANDLE;
     
     for(uint32_t i=0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         outWindow->frames[i].graphicsPool = VK_NULL_HANDLE;
-        outWindow->frames[i].transferPool = VK_NULL_HANDLE;
         outWindow->frames[i].computePool = VK_NULL_HANDLE;
         outWindow->frames[i].graphicsCommandBuffer = VK_NULL_HANDLE;
-        outWindow->frames[i].transferCommandBuffer = VK_NULL_HANDLE;
         outWindow->frames[i].computeCommandBuffer = VK_NULL_HANDLE;
         outWindow->frames[i].presentSemaphore = VK_NULL_HANDLE;
         outWindow->frames[i].renderFence = VK_NULL_HANDLE;
+        outWindow->frames[i].uniformBuffer     = VK_NULL_HANDLE;
+        outWindow->frames[i].uniformAllocation = VK_NULL_HANDLE;
+        outWindow->frames[i].uniformMapped     = NULL;
+        outWindow->frames[i].objectBuffer      = VK_NULL_HANDLE;
+        outWindow->frames[i].objectAllocation  = VK_NULL_HANDLE;
+        outWindow->frames[i].objectMapped      = NULL;
+        outWindow->frames[i].globalDescriptorSet = VK_NULL_HANDLE;
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     
     outWindow->handle = glfwCreateWindow(
         createInfo->width,
@@ -343,13 +536,18 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
         vkWindowDestroy(ctx, outWindow);
         return result;
     }
-
-    outWindow->renderSemaphores = malloc(outWindow->swapChainImageCount * sizeof(VkSemaphore));
-    VkSemaphoreCreateInfo semInfo = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    for (uint32_t i = 0; i < outWindow->swapChainImageCount; i++) {
-        vkCreateSemaphore(ctx->logicalDevice, &semInfo, NULL, &outWindow->renderSemaphores[i]);
+    result = create_depth_image(ctx, outWindow);
+    if (result.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Depth image creation failed.");
+        vkWindowDestroy(ctx, outWindow);
+        return result;
     }
-
+    result = create_render_semaphores(ctx, outWindow);
+    if (result.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Render semaphore creation failed.");
+        vkWindowDestroy(ctx, outWindow);
+        return result;
+    }
     result = create_frame_data(ctx, outWindow);
     if (result.status != VULKAN_SUCCESS) {
         LOG_ERROR("Vulkan frame data creation failed.");
@@ -389,8 +587,13 @@ void vkWindowDestroy(VkContext* ctx, VkWindow* window) {
         if (window->frames[i].computePool != VK_NULL_HANDLE) {
             vkDestroyCommandPool(ctx->logicalDevice, window->frames[i].computePool, NULL);
         }
-        if (window->frames[i].transferPool != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(ctx->logicalDevice, window->frames[i].transferPool, NULL);
+        if (window->frames[i].uniformBuffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(ctx->allocator, window->frames[i].uniformBuffer, window->frames[i].uniformAllocation);
+            window->frames[i].uniformBuffer = VK_NULL_HANDLE;
+        }
+        if (window->frames[i].objectBuffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(ctx->allocator, window->frames[i].objectBuffer, window->frames[i].objectAllocation);
+            window->frames[i].objectBuffer = VK_NULL_HANDLE;
         }
     }
 

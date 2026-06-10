@@ -642,7 +642,7 @@ VulkanResult vkContextInitializeHardware(VkContext* ctx, VkSurfaceKHR surface) {
     }
     res = create_transfer_pool(ctx);
     if (res.status != VULKAN_SUCCESS) {
-        LOG_ERROR("Logical device creation failed transfer command pool creation failed.");
+        LOG_ERROR("Transfer command pool creation failed. Status: %i", res.status);
         return res;
     }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};

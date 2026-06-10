@@ -12,15 +12,22 @@
 typedef struct VkFrameData {
     VkCommandPool graphicsPool;
     VkCommandBuffer graphicsCommandBuffer;
-
-    VkCommandPool transferPool;
-    VkCommandBuffer transferCommandBuffer;
     
     VkCommandPool computePool;
     VkCommandBuffer computeCommandBuffer;
     
     VkSemaphore presentSemaphore;
     VkFence renderFence;
+
+    VkBuffer         uniformBuffer;
+    VmaAllocation    uniformAllocation;
+    void*            uniformMapped;
+
+    VkBuffer         objectBuffer;
+    VmaAllocation    objectAllocation;
+    void*            objectMapped;
+
+    VkDescriptorSet  globalDescriptorSet;
 } VkFrameData;
 
 typedef struct VkWindow {
@@ -37,6 +44,10 @@ typedef struct VkWindow {
     VkExtent2D swapChainExtent;
 
     VkSemaphore* renderSemaphores;
+
+    VkImage       depthImage;
+    VkImageView   depthImageView;
+    VmaAllocation depthAllocation;
     
     uint32_t frameIndex;
     VkFrameData frames[MAX_FRAMES_IN_FLIGHT];
@@ -51,6 +62,7 @@ typedef struct VkWindowCreateInfo {
 } VkWindowCreateInfo;
 
 VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo, VkWindow* outWindow);
+VulkanResult vkWindowRecreateSwapchain(VkContext* ctx, VkWindow* window);
 bool vkWindowShouldClose(VkWindow* window);
 void vkPollEvents();
 void vkWindowDestroy(VkContext* ctx, VkWindow* window);
