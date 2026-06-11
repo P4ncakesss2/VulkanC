@@ -84,6 +84,9 @@ typedef struct VkContext {
 
     VkDescriptorPool      globalDescriptorPool;
     VkDescriptorSet       globalDescriptorSets[MAX_FRAMES_IN_FLIGHT];
+
+    VkSampler      globalSampler;
+    uint32_t       textureCount;
 } VkContext;
 
 typedef struct VkContextCreateInfo {

@@ -12,8 +12,10 @@ typedef struct GlobalUBO {
 
 #define MAX_OBJECTS 1024
 
-typedef struct ObjectSSBO {
-    mat4 modelMatrices[MAX_OBJECTS];
+typedef struct {
+    mat4     transform;
+    uint32_t textureID;
+    uint32_t pad[3];
 } ObjectSSBO;
 
 #endif

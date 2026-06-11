@@ -6,26 +6,50 @@
 #include <stdlib.h>
 #include "render_types.h"
 #include "logger.h"
+#include "texture.h"
 
 static Vertex boxVertices[] = {
-    {{-0.5f, -0.5f,  0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{ 0.5f, -0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{ 0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
-    {{-0.5f,  0.5f,  0.5f}, {1.0f, 1.0f, 0.0f}},
-    {{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 1.0f}},
-    {{ 0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 1.0f}},
-    {{ 0.5f,  0.5f, -0.5f}, {1.0f, 1.0f, 1.0f}},
-    {{-0.5f,  0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}},
+    // Front  (+Z)
+    {{-0.5f, -0.5f,  0.5f}, {1,1,1}, {0.0f, 0.0f}},
+    {{ 0.5f, -0.5f,  0.5f}, {1,1,1}, {1.0f, 0.0f}},
+    {{ 0.5f,  0.5f,  0.5f}, {1,1,1}, {1.0f, 1.0f}},
+    {{-0.5f,  0.5f,  0.5f}, {1,1,1}, {0.0f, 1.0f}},
+    // Back   (-Z)
+    {{ 0.5f, -0.5f, -0.5f}, {1,1,1}, {0.0f, 0.0f}},
+    {{-0.5f, -0.5f, -0.5f}, {1,1,1}, {1.0f, 0.0f}},
+    {{-0.5f,  0.5f, -0.5f}, {1,1,1}, {1.0f, 1.0f}},
+    {{ 0.5f,  0.5f, -0.5f}, {1,1,1}, {0.0f, 1.0f}},
+    // Left   (-X)
+    {{-0.5f, -0.5f, -0.5f}, {1,1,1}, {0.0f, 0.0f}},
+    {{-0.5f, -0.5f,  0.5f}, {1,1,1}, {1.0f, 0.0f}},
+    {{-0.5f,  0.5f,  0.5f}, {1,1,1}, {1.0f, 1.0f}},
+    {{-0.5f,  0.5f, -0.5f}, {1,1,1}, {0.0f, 1.0f}},
+    // Right  (+X)
+    {{ 0.5f, -0.5f,  0.5f}, {1,1,1}, {0.0f, 0.0f}},
+    {{ 0.5f, -0.5f, -0.5f}, {1,1,1}, {1.0f, 0.0f}},
+    {{ 0.5f,  0.5f, -0.5f}, {1,1,1}, {1.0f, 1.0f}},
+    {{ 0.5f,  0.5f,  0.5f}, {1,1,1}, {0.0f, 1.0f}},
+    // Top    (+Y)  — note: Y-down in Vulkan, flip if needed
+    {{-0.5f, -0.5f, -0.5f}, {1,1,1}, {0.0f, 0.0f}},
+    {{ 0.5f, -0.5f, -0.5f}, {1,1,1}, {1.0f, 0.0f}},
+    {{ 0.5f, -0.5f,  0.5f}, {1,1,1}, {1.0f, 1.0f}},
+    {{-0.5f, -0.5f,  0.5f}, {1,1,1}, {0.0f, 1.0f}},
+    // Bottom (-Y)
+    {{-0.5f,  0.5f,  0.5f}, {1,1,1}, {0.0f, 0.0f}},
+    {{ 0.5f,  0.5f,  0.5f}, {1,1,1}, {1.0f, 0.0f}},
+    {{ 0.5f,  0.5f, -0.5f}, {1,1,1}, {1.0f, 1.0f}},
+    {{-0.5f,  0.5f, -0.5f}, {1,1,1}, {0.0f, 1.0f}},
+};
+ 
+static uint32_t boxIndices[] = {
+     0,  1,  2,   2,  3,  0,   // front
+     4,  5,  6,   6,  7,  4,   // back
+     8,  9, 10,  10, 11,  8,   // left
+    12, 13, 14,  14, 15, 12,   // right
+    16, 17, 18,  18, 19, 16,   // top
+    20, 21, 22,  22, 23, 20,   // bottom
 };
 
-static uint32_t boxIndices[] = {
-    0, 1, 2,  2, 3, 0,  // front
-    5, 4, 7,  7, 6, 5,  // back
-    4, 0, 3,  3, 7, 4,  // left
-    1, 5, 6,  6, 2, 1,  // right
-    3, 2, 6,  6, 7, 3,  // top
-    4, 5, 1,  1, 0, 4,  // bottom
-};
 
 #define MESH_AMOUNT 5
 
@@ -131,14 +155,14 @@ static VulkanResult create_graphics_pipeline(VkContext* ctx, VkWindow* window) {
     VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
     VkVertexInputBindingDescription bindingDesc = vkVertexGetBindingDescription();
-    VkVertexInputAttributeDescription attrDescs[2];
+    VkVertexInputAttributeDescription attrDescs[3];
     vkVertexGetAttributeDescription(attrDescs);
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount   = 1,
         .pVertexBindingDescriptions      = &bindingDesc,
-        .vertexAttributeDescriptionCount = 2,
+        .vertexAttributeDescriptionCount = 3,
         .pVertexAttributeDescriptions    = attrDescs,
     };
 
@@ -536,18 +560,23 @@ static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
     float totalWidth = (MESH_AMOUNT - 1) * 1.5f;
     float startX = -totalWidth / 2.0f;
 
+
     for (int i = 0; i < MESH_AMOUNT; i++) {
         float xPos = startX + (i * 1.5f);
-        vec3 pos = {xPos, 0.0f, 3.0f};
-        vec3 axis = {0.0f, 1.0f, 0.0f};
+        vec3 pos   = {xPos, 0.0f, 3.0f};
+        vec3 axis  = {0.0f, 1.0f, 0.0f};
         mat4 tempMatrix;
         glm_mat4_identity(tempMatrix);
         glm_translate(tempMatrix, pos);
         glm_rotate(tempMatrix, angle + i, axis);
-
-        // Push it directly to the mapped pointer
-        update_single_transform(ctx, frameIndex, i, tempMatrix);
+    
+        // write transform + textureID together
+        char* baseAddr   = (char*)ctx->objectStorageMapped;
+        ObjectSSBO* ssbo = (ObjectSSBO*)(baseAddr + (frameIndex * ctx->objectFrameStride));
+        glm_mat4_copy(tempMatrix, ssbo[i].transform);
+        ssbo[i].textureID = app.mesh[i].textureID;
     }
+
     record_command_buffer(ctx, window, imageIndex);
 
     VkPipelineStageFlags waitDestinationStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -598,7 +627,7 @@ int main() {
     VkContextCreateInfo createInfo = {
         .appName = "Test App",
         .enablePresentation = true,
-        .validationLayers = false,
+        .validationLayers = true,
     };
 
     app.graphicsPipeline  = VK_NULL_HANDLE;
@@ -620,16 +649,24 @@ int main() {
         // blah blah blah
     }
 
+
+    VkTexture stoneTex;
+    uint32_t  stoneSlot;
+    result = vkTextureLoad(&context, "assets/box.jpg", &stoneTex, &stoneSlot);
+    if (result.status != VULKAN_SUCCESS) { /* handle */ }
+    
     VkMeshCreateInfo meshInfo = {
-        .vertexArray = boxVertices,
-        .indexArray = boxIndices,
-        .vertexCount = sizeof(boxVertices) / sizeof(boxVertices[0]),
-        .indexCount = sizeof(boxIndices) / sizeof(boxIndices[0]),
+        .vertexArray  = boxVertices,
+        .indexArray   = boxIndices,
+        .vertexCount  = sizeof(boxVertices) / sizeof(boxVertices[0]),
+        .indexCount   = sizeof(boxIndices)  / sizeof(boxIndices[0]),
+        .textureID    = stoneSlot,   // <-- assigned here
     };
-    for(int i=0; i < MESH_AMOUNT; i++) {
-        result = vkMeshCreate(&context,&meshInfo, &app.mesh[i]);
-        if (result.status != VULKAN_SUCCESS) { }
+    for (int i = 0; i < MESH_AMOUNT; i++) {
+        result = vkMeshCreate(&context, &meshInfo, &app.mesh[i]);
+        if (result.status != VULKAN_SUCCESS) { /* handle */ }
     }
+
 
     result = create_graphics_pipeline(&context, &window);
     if (result.status != VULKAN_SUCCESS) { }
@@ -663,6 +700,7 @@ int main() {
     }
     
     vkDeviceWaitIdle(context.logicalDevice);
+    vkTextureDestroy(&context, &stoneTex);
     vkDestroyPipeline(context.logicalDevice, app.graphicsPipeline, NULL);
     vkDestroyPipelineLayout(context.logicalDevice, app.pipelineLayout, NULL);
 

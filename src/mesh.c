@@ -11,23 +11,32 @@ VkVertexInputBindingDescription vkVertexGetBindingDescription() {
     return bindingDesc;
 }
 
-void vkVertexGetAttributeDescription(VkVertexInputAttributeDescription attributes[2]) {
+void vkVertexGetAttributeDescription(VkVertexInputAttributeDescription attributes[3]) {
+    // position
     attributes[0].location = 0;
-    attributes[0].binding = 0;
-    attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[0].offset = offsetof(Vertex, position);
+    attributes[0].binding  = 0;
+    attributes[0].format   = VK_FORMAT_R32G32B32_SFLOAT;
+    attributes[0].offset   = offsetof(Vertex, position);
 
+    // color
     attributes[1].location = 1;
-    attributes[1].binding = 0;
-    attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[1].offset = offsetof(Vertex, color);
+    attributes[1].binding  = 0;
+    attributes[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
+    attributes[1].offset   = offsetof(Vertex, color);
+
+    // uv
+    attributes[2].location = 2;
+    attributes[2].binding  = 0;
+    attributes[2].format   = VK_FORMAT_R32G32_SFLOAT;
+    attributes[2].offset   = offsetof(Vertex, uv);
 }
 
 VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* outMesh) {
-    VkDeviceSize vertexSize  = sizeof(Vertex) * createInfo->vertexCount;
-    VkDeviceSize indexSize   = sizeof(uint32_t) * createInfo->indexCount;
-    VkDeviceSize totalSize   = vertexSize + indexSize;
+    VkDeviceSize vertexSize = sizeof(Vertex) * createInfo->vertexCount;
+    VkDeviceSize indexSize  = sizeof(uint32_t) * createInfo->indexCount;
+    VkDeviceSize totalSize  = vertexSize + indexSize;
 
+    // staging buffer
     VkBufferCreateInfo stagingBufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size  = totalSize,
@@ -51,6 +60,7 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
     memcpy(stagingAllocResult.pMappedData, createInfo->vertexArray, vertexSize);
     memcpy((char*)stagingAllocResult.pMappedData + vertexSize, createInfo->indexArray, indexSize);
 
+    // device-local buffer
     VkBufferCreateInfo deviceBufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size  = totalSize,
@@ -70,6 +80,7 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
         return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
     }
 
+    // upload
     VkCommandBufferAllocateInfo cmdAllocInfo = {
         .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool        = ctx->transferPool,
@@ -90,12 +101,7 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     vkBeginCommandBuffer(cmd, &beginInfo);
-
-    VkBufferCopy region = {
-        .srcOffset = 0,
-        .dstOffset = 0,
-        .size      = totalSize,
-    };
+    VkBufferCopy region = { .srcOffset = 0, .dstOffset = 0, .size = totalSize };
     vkCmdCopyBuffer(cmd, stagingBuffer, outMesh->buffer, 1, &region);
     vkEndCommandBuffer(cmd);
 
@@ -106,13 +112,13 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
     };
     vkQueueSubmit(ctx->queues.transfer, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(ctx->queues.transfer);
-
     vkFreeCommandBuffers(ctx->logicalDevice, ctx->transferPool, 1, &cmd);
     vmaDestroyBuffer(ctx->allocator, stagingBuffer, stagingAllocation);
 
     outMesh->vertexCount = createInfo->vertexCount;
     outMesh->indexCount  = createInfo->indexCount;
     outMesh->indexOffset = vertexSize;
+    outMesh->textureID   = createInfo->textureID;
 
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
@@ -123,6 +129,7 @@ void vkMeshDraw(VkMesh* mesh, VkCommandBuffer cmd, uint32_t firstInstance) {
     vkCmdBindIndexBuffer(cmd, mesh->buffer, mesh->indexOffset, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, firstInstance);
 }
+
 void vkMeshDestroy(VkContext* ctx, VkMesh* mesh) {
     vmaDestroyBuffer(ctx->allocator, mesh->buffer, mesh->allocation);
 }

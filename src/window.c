@@ -259,6 +259,7 @@ static VulkanResult create_image_data(VkContext* ctx, VkWindow* window) {
             return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED, .vk_result = result};
         }
     }
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
 static VulkanResult create_frame_data(VkContext* ctx, VkWindow* window) {
