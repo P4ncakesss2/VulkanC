@@ -4,17 +4,8 @@ struct GlobalUBO {
     float     time;
 };
 
-struct ObjectSSBO {
-    float4x4 modelMatrices[1024];
-};
-
-[[vk::binding(0, 0)]] ConstantBuffer<GlobalUBO> globalUBO;
-[[vk::binding(1, 0)]] StructuredBuffer<float4x4> modelMatrices;
-
-struct PushConstants {
-    uint objectIndex;
-};
-[[vk::push_constant]] PushConstants pushConstants;
+[[vk::binding(0, 0)]] StructuredBuffer<float4x4> objectMatrices;
+[[vk::binding(0, 1)]] ConstantBuffer<GlobalUBO> globalUBO;
 
 struct VertexInput {
     float3 position : POSITION;
@@ -27,12 +18,14 @@ struct VertexOutput {
 };
 
 [shader("vertex")]
-VertexOutput vertMain(VertexInput vin) {
+VertexOutput vertMain(VertexInput vin, uint instanceID : SV_VulkanInstanceID) {
     VertexOutput output;
-    float4x4 model = modelMatrices[pushConstants.objectIndex];
+    float4x4 model = objectMatrices[instanceID];
+
     float4 worldPos = mul(model, float4(vin.position, 1.0));
     output.sv_position = mul(globalUBO.proj, mul(globalUBO.view, worldPos));
     output.color = vin.color;
+
     return output;
 }
 

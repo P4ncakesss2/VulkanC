@@ -1,5 +1,7 @@
 #include "vulkan_ctx.h"
 #include "logger.h"
+#include "window.h"
+#include "render_types.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
 #include <stdlib.h>
@@ -556,7 +558,8 @@ static VulkanResult create_logical_device(VkContext* ctx) {
     VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extDynamicState = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
         .pNext = &vk11Features,
-        .extendedDynamicState = VK_TRUE};
+        .extendedDynamicState = VK_TRUE
+    };
 
     VkPhysicalDeviceVulkan13Features vk13Features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -565,22 +568,32 @@ static VulkanResult create_logical_device(VkContext* ctx) {
         .synchronization2 = VK_TRUE
     };
 
+    VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES,
+        .pNext = &vk13Features, 
+        .descriptorBindingPartiallyBound = VK_TRUE,
+        .runtimeDescriptorArray = VK_TRUE,
+        .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE
+    };
+
     VkPhysicalDeviceFeatures2 features2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &vk13Features,
-        .features.samplerAnisotropy = VK_TRUE};
+        .pNext = &indexingFeatures,
+        .features.samplerAnisotropy = VK_TRUE
+    };
 
     VkDeviceCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = &features2,
         .flags = 0,
         .queueCreateInfoCount = uniqueCount,
-        .pQueueCreateInfos = queueCreateInfos,
+        .pQueueCreateInfos = queueCreateInfos, 
         .enabledLayerCount = 0,
         .ppEnabledLayerNames = NULL,
         .enabledExtensionCount = deviceExtensionsCount,
         .ppEnabledExtensionNames = deviceExtensions,
-        .pEnabledFeatures = NULL};
+        .pEnabledFeatures = NULL
+    };
 
     VkResult result = vkCreateDevice(ctx->physicalDevice, &createInfo, NULL, &ctx->logicalDevice);
     if (result != VK_SUCCESS)
@@ -629,6 +642,146 @@ static VulkanResult create_transfer_pool(VkContext* ctx) {
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
+static VulkanResult create_global_ssbo(VkContext* ctx) {
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(ctx->physicalDevice, &properties);
+    VkDeviceSize alignment = properties.limits.minStorageBufferOffsetAlignment;
+
+    VkDeviceSize rawSizePerFrame = sizeof(ObjectSSBO);
+    ctx->objectFrameStride = (rawSizePerFrame + alignment - 1) & ~(alignment - 1);
+
+    VkDeviceSize totalSize = ctx->objectFrameStride * MAX_FRAMES_IN_FLIGHT;
+
+    VkBufferCreateInfo bufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = NULL,
+        .size = totalSize,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+
+    VmaAllocationCreateInfo allocInfo = {
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | 
+                 VMA_ALLOCATION_CREATE_MAPPED_BIT
+    };
+
+    VmaAllocationInfo resultInfo;
+    VkResult vkRes = vmaCreateBuffer(
+        ctx->allocator, 
+        &bufferInfo, 
+        &allocInfo, 
+        &ctx->objectStorageBuffer, 
+        &ctx->objectStorageAllocation, 
+        &resultInfo
+    );
+
+    if (vkRes != VK_SUCCESS) {
+        LOG_ERROR("Failed to allocate global context SSBO via VMA.");
+        return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = vkRes};
+    }
+
+    ctx->objectStorageMapped = resultInfo.pMappedData;
+
+    LOG_INFO("Global Context SSBO created successfully. Stride per frame: %lu bytes. Total: %lu bytes.", 
+             (unsigned long)ctx->objectFrameStride, (unsigned long)totalSize);
+
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
+static VulkanResult create_descriptor_layouts(VkContext* ctx) {
+    VkDescriptorSetLayoutBinding bindings[1] = {
+        {
+            .binding         = 0,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT,
+        },
+    };
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings    = bindings,
+    };
+    VkResult result = vkCreateDescriptorSetLayout(ctx->logicalDevice, &layoutInfo, NULL, &ctx->globalSetLayout);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("vkCreateDescriptorSetLayout failed. VkResult: %i", result);
+        return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_SET_LAYOUT_CREATION_FAILED, .vk_result = result};
+    }
+    VkDescriptorSetLayoutBinding windowBindings[1] = {
+        {
+            .binding         = 0,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+    };
+    VkDescriptorSetLayoutCreateInfo windowLayoutInfo = {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings    = windowBindings,
+    };
+    result = vkCreateDescriptorSetLayout(ctx->logicalDevice, &windowLayoutInfo, NULL, &ctx->windowSetLayout);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("vkCreateDescriptorSetLayout failed. VkResult: %i", result);
+        return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_SET_LAYOUT_CREATION_FAILED, .vk_result = result};
+    }
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
+static VulkanResult create_descriptor_pool(VkContext* ctx) {
+    VkDescriptorPoolSize poolSizes[1] = {
+        { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT },
+    };
+    VkDescriptorPoolCreateInfo poolInfo = {
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets       = MAX_FRAMES_IN_FLIGHT,
+        .poolSizeCount = 1,
+        .pPoolSizes    = poolSizes,
+    };
+    VkResult result = vkCreateDescriptorPool(ctx->logicalDevice, &poolInfo, NULL, &ctx->globalDescriptorPool);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("vkCreateDescriptorPool failed. VkResult: %i", result);
+        return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_POOL_CREATION_FAILED, .vk_result = result};
+    }
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
+static VulkanResult create_frame_descriptors(VkContext* ctx) {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorSetAllocateInfo allocInfo = {
+            .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool     = ctx->globalDescriptorPool,
+            .descriptorSetCount = 1,
+            .pSetLayouts        = &ctx->globalSetLayout,
+        };
+        VkResult result = vkAllocateDescriptorSets(ctx->logicalDevice, &allocInfo, &ctx->globalDescriptorSets[i]);
+        if (result != VK_SUCCESS) {
+            LOG_ERROR("vkAllocateDescriptorSets failed for frame %u. VkResult: %i", i, result);
+            return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_SET_ALLOCATION_FAILED, .vk_result = result};
+        }
+
+        VkDescriptorBufferInfo ssboInfo = {
+            .buffer = ctx->objectStorageBuffer,
+            .offset = i * ctx->objectFrameStride,
+            .range  = sizeof(ObjectSSBO),
+        };
+        VkWriteDescriptorSet writes[1] = {
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = ctx->globalDescriptorSets[i],
+                .dstBinding      = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo     = &ssboInfo,
+            },
+        };
+        vkUpdateDescriptorSets(ctx->logicalDevice, 1, writes, 0, NULL);
+    }
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
 VulkanResult vkContextInitializeHardware(VkContext* ctx, VkSurfaceKHR surface) {
     VulkanResult res = pick_physical_device(ctx, surface);
     if (res.status != VULKAN_SUCCESS) {
@@ -645,6 +798,27 @@ VulkanResult vkContextInitializeHardware(VkContext* ctx, VkSurfaceKHR surface) {
         LOG_ERROR("Transfer command pool creation failed. Status: %i", res.status);
         return res;
     }
+    res = create_global_ssbo(ctx);
+    if (res.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Hardware initialization aborted: Global SSBO creation failed.");
+        return res;
+    }
+    res = create_descriptor_layouts(ctx);
+    if (res.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Hardware initialization aborted: descriptor layouts creation failed.");
+        return res;
+    }
+    res = create_descriptor_pool(ctx);
+    if (res.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Hardware initialization aborted: descriptor pool creation failed.");
+        return res;
+    }
+    res = create_frame_descriptors(ctx);
+    if (res.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Hardware initialization aborted: descriptor sets creation failed.");
+        return res;
+    }
+    LOG_INFO("Vulkan hardware initialization complete.");
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -698,9 +872,27 @@ VulkanResult vkContextCreate(VkContextCreateInfo* createInfo, VkContext* outCtx)
 
 void vkContextDestroy(VkContext* ctx) {
     if (ctx == NULL) return;
+    if (ctx->objectStorageBuffer != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(ctx->allocator, ctx->objectStorageBuffer, ctx->objectStorageAllocation);
+        ctx->objectStorageBuffer = VK_NULL_HANDLE;
+        ctx->objectStorageAllocation = VK_NULL_HANDLE;
+        ctx->objectStorageMapped = NULL;
+    }
     if (ctx->transferPool != VK_NULL_HANDLE) {
         vkDestroyCommandPool(ctx->logicalDevice, ctx->transferPool, NULL);
         ctx->transferPool = VK_NULL_HANDLE;
+    }
+    if (ctx->globalDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(ctx->logicalDevice, ctx->globalDescriptorPool, NULL);
+        ctx->globalDescriptorPool = VK_NULL_HANDLE;
+    }
+    if (ctx->globalSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(ctx->logicalDevice, ctx->globalSetLayout, NULL);
+        ctx->globalSetLayout = VK_NULL_HANDLE;
+    }
+    if (ctx->windowSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(ctx->logicalDevice, ctx->windowSetLayout, NULL);
+        ctx->windowSetLayout = VK_NULL_HANDLE;
     }
     if (ctx->allocator != VK_NULL_HANDLE) {
         vmaDestroyAllocator(ctx->allocator);

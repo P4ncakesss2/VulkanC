@@ -117,13 +117,12 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
-VulkanResult vkMeshBind(VkMesh* mesh, VkCommandBuffer cmd) {
+void vkMeshDraw(VkMesh* mesh, VkCommandBuffer cmd, uint32_t firstInstance) {
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->buffer, &offset);
     vkCmdBindIndexBuffer(cmd, mesh->buffer, mesh->indexOffset, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, 0);
+    vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, firstInstance);
 }
-
 void vkMeshDestroy(VkContext* ctx, VkMesh* mesh) {
     vmaDestroyBuffer(ctx->allocator, mesh->buffer, mesh->allocation);
 }

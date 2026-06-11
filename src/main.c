@@ -27,12 +27,12 @@ static uint32_t boxIndices[] = {
     4, 5, 1,  1, 0, 4,  // bottom
 };
 
+#define MESH_AMOUNT 5
+
 typedef struct App {
     VkPipelineLayout      pipelineLayout;
     VkPipeline            graphicsPipeline;
-    VkDescriptorSetLayout globalSetLayout;
-    VkDescriptorPool      descriptorPool;
-    VkMesh             mesh;
+    VkMesh             mesh[MESH_AMOUNT]; // in the future get it out of here
 } App;
 
 static App app;
@@ -92,101 +92,6 @@ VkShaderModule create_shader_module(VkDevice device, const char* code, size_t co
     return shaderModule;
 }
 
-static VulkanResult create_global_descriptor_layout(VkContext* ctx) {
-    VkDescriptorSetLayoutBinding bindings[2] = {
-        {
-            .binding         = 0,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-        {
-            .binding         = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT,
-        },
-    };
-    VkDescriptorSetLayoutCreateInfo layoutInfo = {
-        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 2,
-        .pBindings    = bindings,
-    };
-    VkResult result = vkCreateDescriptorSetLayout(ctx->logicalDevice, &layoutInfo, NULL, &app.globalSetLayout);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vkCreateDescriptorSetLayout failed. VkResult: %i", result);
-        return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_SET_LAYOUT_CREATION_FAILED, .vk_result = result};
-    }
-    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
-}
-
-static VulkanResult create_descriptor_pool(VkContext* ctx) {
-    VkDescriptorPoolSize poolSizes[2] = {
-        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT },
-        { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT },
-    };
-    VkDescriptorPoolCreateInfo poolInfo = {
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = MAX_FRAMES_IN_FLIGHT,
-        .poolSizeCount = 2,
-        .pPoolSizes    = poolSizes,
-    };
-    VkResult result = vkCreateDescriptorPool(ctx->logicalDevice, &poolInfo, NULL, &app.descriptorPool);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vkCreateDescriptorPool failed. VkResult: %i", result);
-        return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_POOL_CREATION_FAILED, .vk_result = result};
-    }
-    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
-}
-
-static VulkanResult create_frame_descriptors(VkContext* ctx, VkWindow* window) {
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorSetAllocateInfo allocInfo = {
-            .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool     = app.descriptorPool,
-            .descriptorSetCount = 1,
-            .pSetLayouts        = &app.globalSetLayout,
-        };
-        VkResult result = vkAllocateDescriptorSets(ctx->logicalDevice, &allocInfo, &window->frames[i].globalDescriptorSet);
-        if (result != VK_SUCCESS) {
-            LOG_ERROR("vkAllocateDescriptorSets failed for frame %u. VkResult: %i", i, result);
-            return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_SET_ALLOCATION_FAILED, .vk_result = result};
-        }
-
-        VkDescriptorBufferInfo uboInfo = {
-            .buffer = window->frames[i].uniformBuffer,
-            .offset = 0,
-            .range  = sizeof(GlobalUBO),
-        };
-        VkDescriptorBufferInfo ssboInfo = {
-            .buffer = window->frames[i].objectBuffer,
-            .offset = 0,
-            .range  = sizeof(ObjectSSBO),
-        };
-        VkWriteDescriptorSet writes[2] = {
-            {
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = window->frames[i].globalDescriptorSet,
-                .dstBinding      = 0,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .pBufferInfo     = &uboInfo,
-            },
-            {
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = window->frames[i].globalDescriptorSet,
-                .dstBinding      = 1,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .pBufferInfo     = &ssboInfo,
-            },
-        };
-        vkUpdateDescriptorSets(ctx->logicalDevice, 2, writes, 0, NULL);
-    }
-    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
-}
 
 static VulkanResult create_graphics_pipeline(VkContext* ctx, VkWindow* window) {
     size_t shaderSize = 0;
@@ -325,12 +230,17 @@ static VulkanResult create_graphics_pipeline(VkContext* ctx, VkWindow* window) {
         .size       = sizeof(uint32_t),
     };
 
+    VkDescriptorSetLayout layouts[2] = {
+        ctx->globalSetLayout,  // set = 0
+        ctx->windowSetLayout   // set = 1
+    };
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pNext                  = NULL,
         .flags                  = 0,
-        .setLayoutCount         = 1,
-        .pSetLayouts            = &app.globalSetLayout,
+        .setLayoutCount         = 2,
+        .pSetLayouts            = layouts,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges    = &pushConstantRange,
     };
@@ -388,55 +298,15 @@ static VulkanResult create_graphics_pipeline(VkContext* ctx, VkWindow* window) {
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
-void transition_image_layout(
-    VkWindow* window,
-    VkCommandBuffer          cmd,
-    uint32_t                 imageIndex,
-    VkImageLayout            old_layout,
-    VkImageLayout            new_layout,
-    VkAccessFlags2           src_access_mask,
-    VkAccessFlags2           dst_access_mask,
-    VkPipelineStageFlags2    src_stage_mask,
-    VkPipelineStageFlags2    dst_stage_mask)
-{
-    VkImageMemoryBarrier2 barrier = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .pNext = NULL,
-        .srcStageMask = src_stage_mask,
-        .srcAccessMask = src_access_mask,
-        .dstStageMask = dst_stage_mask,
-        .dstAccessMask = dst_access_mask,
-        .oldLayout = old_layout,
-        .newLayout = new_layout,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = window->swapChainImages[imageIndex],
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1
-        }
-    };
+VulkanResult record_command_buffer(VkContext* ctx, VkWindow* window, uint32_t imageIndex) {
+    uint32_t frameIndex = window->frameIndex;
+    VkFrameData* framedata = &window->frames[frameIndex];
+    VkImageData* imagedata = &window->imageData[imageIndex];
+    VkCommandBuffer cmd = imagedata->graphicsCommandBuffer;
 
-    VkDependencyInfo dependencyInfo = {
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .pNext = NULL,
-        .dependencyFlags = 0,
-        .memoryBarrierCount = 0,
-        .pMemoryBarriers = NULL,
-        .bufferMemoryBarrierCount = 0,
-        .pBufferMemoryBarriers = NULL,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &barrier
-    };
-
-    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
-}
-
-VulkanResult record_command_buffer(VkWindow* window, uint32_t imageIndex) {
-    VkCommandBuffer cmd = window->frames[window->frameIndex].graphicsCommandBuffer;
+    if (imagedata->commandBufferRecorded) {
+        return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+    }
 
     VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -450,43 +320,59 @@ VulkanResult record_command_buffer(VkWindow* window, uint32_t imageIndex) {
         return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_FAILED_BEGIN, .vk_result = beginResult};
     }
 
-    transition_image_layout(
-        window,
-        cmd,
-        imageIndex,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        0,                                                  // srcAccessMask
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,             // dstAccessMask
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,    // srcStageMask
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT     // dstStageMask
-    );
-    VkImageMemoryBarrier2 depthBarrier = {
-        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-        .srcAccessMask       = 0,
-        .dstStageMask        = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-        .dstAccessMask       = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout           = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image               = window->depthImage,
-        .subresourceRange    = {
-            .aspectMask      = VK_IMAGE_ASPECT_DEPTH_BIT,
-            .baseMipLevel    = 0,
-            .levelCount      = 1,
-            .baseArrayLayer  = 0,
-            .layerCount      = 1,
+    VkImageMemoryBarrier2 initialBarriers[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .pNext = NULL,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcAccessMask = 0,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = window->swapChainImages[imageIndex],
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1
+            }
         },
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .pNext = NULL,
+            .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+            .srcAccessMask = 0,
+            .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+            .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = window->depthImage,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            }
+        }
     };
-    VkDependencyInfo depthDependency = {
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &depthBarrier,
+
+    VkDependencyInfo initialDependency = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .pNext = NULL,
+        .dependencyFlags = 0,
+        .imageMemoryBarrierCount = 2,
+        .pImageMemoryBarriers = initialBarriers
     };
-    vkCmdPipelineBarrier2(cmd, &depthDependency);
+
+    vkCmdPipelineBarrier2(cmd, &initialDependency);
 
     VkClearValue clearColor = {
         .color = { .float32 = {0.1f, 0.1f, 0.1f, 1.0f} }
@@ -498,8 +384,6 @@ VulkanResult record_command_buffer(VkWindow* window, uint32_t imageIndex) {
         .imageView = window->swapChainImageViews[imageIndex],
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .resolveMode = VK_RESOLVE_MODE_NONE,
-        .resolveImageView = VK_NULL_HANDLE,
-        .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         .clearValue = clearColor
@@ -523,23 +407,19 @@ VulkanResult record_command_buffer(VkWindow* window, uint32_t imageIndex) {
             .extent = window->swapChainExtent
         },
         .layerCount = 1,
-        .viewMask = 0,
         .colorAttachmentCount = 1,
         .pColorAttachments = &attachmentInfo,
         .pDepthAttachment = &depthAttachmentInfo,
-        .pStencilAttachment = NULL
     };
 
     vkCmdBeginRendering(cmd, &renderingInfo);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, app.graphicsPipeline);
 
     VkViewport viewport = {
-        .x = 0.0f,
-        .y = 0.0f,
+        .x = 0.0f, .y = 0.0f,
         .width = (float)window->swapChainExtent.width,
         .height = (float)window->swapChainExtent.height,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f
+        .minDepth = 0.0f, .maxDepth = 1.0f
     };
     vkCmdSetViewport(cmd, 0, 1, &viewport);
 
@@ -549,36 +429,59 @@ VulkanResult record_command_buffer(VkWindow* window, uint32_t imageIndex) {
     };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
+    VkDescriptorSet descriptorSets[2] = {
+        ctx->globalDescriptorSets[frameIndex],
+        window->windowDescriptorSets[frameIndex]
+    };
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-        app.pipelineLayout, 0, 1,
-        &window->frames[window->frameIndex].globalDescriptorSet,
-        0, NULL);
-
-    uint32_t objectIndex = 0;
-    vkCmdPushConstants(cmd, app.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-        0, sizeof(uint32_t), &objectIndex);
+        app.pipelineLayout, 0, 2, descriptorSets, 0, NULL);
     
-    vkMeshBind(&app.mesh, cmd);
+    uint32_t instanceCount = 0;
+    for (int i=0; i < MESH_AMOUNT; i++) {
+        vkMeshDraw(&app.mesh[i], cmd, instanceCount);
+        instanceCount++;
+    }
 
     vkCmdEndRendering(cmd);
 
-    transition_image_layout(
-        window,
-        cmd,
-        imageIndex,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,             // srcAccessMask
-        0,                                                  // dstAccessMask
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,    // srcStageMask
-        VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT              // dstStageMask
-    );
+    VkImageMemoryBarrier2 presentBarrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .pNext = NULL,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+        .dstAccessMask = 0,
+        .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = window->swapChainImages[imageIndex],
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1
+        }
+    };
+
+    VkDependencyInfo presentDependency = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &presentBarrier
+    };
+    vkCmdPipelineBarrier2(cmd, &presentDependency);
 
     VkResult endResult = vkEndCommandBuffer(cmd);
     if (endResult != VK_SUCCESS) {
         return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_FAILED_END, .vk_result = endResult};
     }
+    imagedata->commandBufferRecorded = true;
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
+void update_single_transform(VkContext* ctx, uint32_t frameIndex, uint32_t objectIndex, mat4 newMatrix) {
+    char* baseAddr = (char*)ctx->objectStorageMapped;
+    mat4* matrixArray = (mat4*)(baseAddr + (frameIndex * ctx->objectFrameStride));
+    memcpy(&matrixArray[objectIndex], newMatrix, sizeof(mat4));
 }
 
 static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
@@ -599,6 +502,8 @@ static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
         VK_NULL_HANDLE,
         &imageIndex
     );
+
+    VkImageData* imagedata = &window->imageData[imageIndex];
     
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         return (VulkanResult){.status = VULKAN_STATUS_SWAPCHAIN_OUTDATED, .vk_result = result};
@@ -608,7 +513,7 @@ static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
     }
 
     vkResetFences(ctx->logicalDevice, 1, &framedata->renderFence);
-    vkResetCommandPool(ctx->logicalDevice, framedata->graphicsPool, 0);
+    //vkResetCommandPool(ctx->logicalDevice, framedata->graphicsPool, 0);
     static double lastTime = 0.0;
     double currentTime = glfwGetTime();
     float deltaTime = (float)(currentTime - lastTime);
@@ -628,14 +533,22 @@ static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
     ubo.time = angle;
     memcpy(framedata->uniformMapped, &ubo, sizeof(GlobalUBO));
 
-    ObjectSSBO objects = {0};
-    glm_mat4_identity(objects.modelMatrices[0]);
-    vec3 pos = {0.0f, 0.0f, 2.0f};
-    glm_translate(objects.modelMatrices[0], pos);
-    vec3 axis = {0.0f, 1.0f, 0.0f};
-    glm_rotate(objects.modelMatrices[0], angle, axis);
-    memcpy(framedata->objectMapped, &objects, sizeof(ObjectSSBO));
-    record_command_buffer(window, imageIndex);
+    float totalWidth = (MESH_AMOUNT - 1) * 1.5f;
+    float startX = -totalWidth / 2.0f;
+
+    for (int i = 0; i < MESH_AMOUNT; i++) {
+        float xPos = startX + (i * 1.5f);
+        vec3 pos = {xPos, 0.0f, 3.0f};
+        vec3 axis = {0.0f, 1.0f, 0.0f};
+        mat4 tempMatrix;
+        glm_mat4_identity(tempMatrix);
+        glm_translate(tempMatrix, pos);
+        glm_rotate(tempMatrix, angle + i, axis);
+
+        // Push it directly to the mapped pointer
+        update_single_transform(ctx, frameIndex, i, tempMatrix);
+    }
+    record_command_buffer(ctx, window, imageIndex);
 
     VkPipelineStageFlags waitDestinationStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submitInfo = {0};
@@ -644,7 +557,7 @@ static VulkanResult draw_frame(VkContext* ctx, VkWindow* window) {
     submitInfo.pWaitSemaphores = &framedata->presentSemaphore;
     submitInfo.pWaitDstStageMask = &waitDestinationStageMask;
     submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &framedata->graphicsCommandBuffer;
+    submitInfo.pCommandBuffers = &imagedata->graphicsCommandBuffer;
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = &window->renderSemaphores[imageIndex];
 
@@ -685,13 +598,11 @@ int main() {
     VkContextCreateInfo createInfo = {
         .appName = "Test App",
         .enablePresentation = true,
-        .validationLayers = true,
+        .validationLayers = false,
     };
 
     app.graphicsPipeline  = VK_NULL_HANDLE;
     app.pipelineLayout    = VK_NULL_HANDLE;
-    app.globalSetLayout   = VK_NULL_HANDLE;
-    app.descriptorPool    = VK_NULL_HANDLE;
     VulkanResult result = vkContextCreate(&createInfo, &context);
     if (result.status != VULKAN_SUCCESS) {
         // blah blah blah
@@ -715,25 +626,35 @@ int main() {
         .vertexCount = sizeof(boxVertices) / sizeof(boxVertices[0]),
         .indexCount = sizeof(boxIndices) / sizeof(boxIndices[0]),
     };
-
-    result = vkMeshCreate(&context,&meshInfo, &app.mesh);
-    if (result.status != VULKAN_SUCCESS) { }
-
-    result = create_global_descriptor_layout(&context);
-    if (result.status != VULKAN_SUCCESS) { }
-
-    result = create_descriptor_pool(&context);
-    if (result.status != VULKAN_SUCCESS) { }
-
-    result = create_frame_descriptors(&context, &window);
-    if (result.status != VULKAN_SUCCESS) { }
+    for(int i=0; i < MESH_AMOUNT; i++) {
+        result = vkMeshCreate(&context,&meshInfo, &app.mesh[i]);
+        if (result.status != VULKAN_SUCCESS) { }
+    }
 
     result = create_graphics_pipeline(&context, &window);
     if (result.status != VULKAN_SUCCESS) { }
 
+    double lastTime = glfwGetTime();
+    int frameCount = 0;
+
     while(!vkWindowShouldClose(&window)) {
         vkPollEvents();
-        result = draw_frame(&context, &window);
+
+        double currentTime = glfwGetTime();
+        frameCount++;
+        
+        if (currentTime - lastTime >= 1.0) {
+            char titleBuffer[128];
+            double fps = (double)frameCount / (currentTime - lastTime);
+            
+            snprintf(titleBuffer, sizeof(titleBuffer), "Test App - FPS: %.1f", fps);
+            glfwSetWindowTitle(window.handle, titleBuffer);
+            
+            frameCount = 0;
+            lastTime = currentTime;
+        }
+
+        result = draw_frame(&context, &window); 
         if (result.status == VULKAN_STATUS_SWAPCHAIN_OUTDATED) {
             vkWindowRecreateSwapchain(&context, &window);
         } else if (result.status != VULKAN_SUCCESS) {
@@ -742,12 +663,12 @@ int main() {
     }
     
     vkDeviceWaitIdle(context.logicalDevice);
-    vkDestroyDescriptorPool(context.logicalDevice, app.descriptorPool, NULL);
-    vkDestroyDescriptorSetLayout(context.logicalDevice, app.globalSetLayout, NULL);
     vkDestroyPipeline(context.logicalDevice, app.graphicsPipeline, NULL);
     vkDestroyPipelineLayout(context.logicalDevice, app.pipelineLayout, NULL);
 
-    vkMeshDestroy(&context, &app.mesh);
+    for(int i=0; i < MESH_AMOUNT; i++) {
+        vkMeshDestroy(&context, &app.mesh[i]);
+    }
     vkWindowDestroy(&context, &window);
     vkContextDestroy(&context);
 

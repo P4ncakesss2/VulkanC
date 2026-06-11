@@ -1,6 +1,8 @@
 #ifndef VULKAN_CTX_H
 #define VULKAN_CTX_H
 
+#define MAX_FRAMES_IN_FLIGHT 2
+
 #include "vk_mem_alloc.h"
 #include <vulkan/vulkan.h>
 #include <stdbool.h>
@@ -71,6 +73,17 @@ typedef struct VkContext {
     VKQueues queues;
     bool presentationEnabled;
     bool isInitialized;
+
+    VkBuffer         objectStorageBuffer;
+    VmaAllocation    objectStorageAllocation;
+    void* objectStorageMapped;
+    VkDeviceSize     objectFrameStride;
+
+    VkDescriptorSetLayout globalSetLayout;
+    VkDescriptorSetLayout windowSetLayout;
+
+    VkDescriptorPool      globalDescriptorPool;
+    VkDescriptorSet       globalDescriptorSets[MAX_FRAMES_IN_FLIGHT];
 } VkContext;
 
 typedef struct VkContextCreateInfo {

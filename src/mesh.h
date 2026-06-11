@@ -28,7 +28,7 @@ VkVertexInputBindingDescription vkVertexGetBindingDescription();
 void vkVertexGetAttributeDescription(VkVertexInputAttributeDescription attributes[2]);
 
 VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* outMesh);
-VulkanResult vkMeshBind(VkMesh* mesh, VkCommandBuffer cmd);
+void vkMeshDraw(VkMesh* mesh, VkCommandBuffer cmd, uint32_t firstInstance);
 void vkMeshDestroy(VkContext* ctx, VkMesh* mesh);
 
 #endif

@@ -7,28 +7,21 @@
 #include <GLFW/glfw3.h>
 #include <stdint.h>
 
-#define MAX_FRAMES_IN_FLIGHT 2
-
 typedef struct VkFrameData {
-    VkCommandPool graphicsPool;
-    VkCommandBuffer graphicsCommandBuffer;
-    
-    VkCommandPool computePool;
-    VkCommandBuffer computeCommandBuffer;
-    
-    VkSemaphore presentSemaphore;
-    VkFence renderFence;
-
-    VkBuffer         uniformBuffer;
-    VmaAllocation    uniformAllocation;
-    void*            uniformMapped;
-
-    VkBuffer         objectBuffer;
-    VmaAllocation    objectAllocation;
-    void*            objectMapped;
-
-    VkDescriptorSet  globalDescriptorSet;
+    VkSemaphore   presentSemaphore;
+    VkFence       renderFence;
+    VkBuffer      uniformBuffer;
+    VmaAllocation uniformAllocation;
+    void*         uniformMapped;
 } VkFrameData;
+
+typedef struct VkImageData {
+    VkCommandPool   graphicsPool;
+    VkCommandBuffer graphicsCommandBuffer;
+    VkCommandPool   computePool;
+    VkCommandBuffer computeCommandBuffer;
+    bool            commandBufferRecorded;
+} VkImageData;
 
 typedef struct VkWindow {
     GLFWwindow* handle;
@@ -48,9 +41,14 @@ typedef struct VkWindow {
     VkImage       depthImage;
     VkImageView   depthImageView;
     VmaAllocation depthAllocation;
+
+    VkDescriptorPool      windowDescriptorPool; 
+    VkDescriptorSet       windowDescriptorSets[MAX_FRAMES_IN_FLIGHT];
     
     uint32_t frameIndex;
     VkFrameData frames[MAX_FRAMES_IN_FLIGHT];
+    VkImageData* imageData;
+
     bool isInitialized;
     bool framebufferResized;
 } VkWindow;
