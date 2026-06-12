@@ -365,7 +365,8 @@ static uint32_t rate_device_suitability(VkPhysicalDevice device, VkSurfaceKHR su
         .pNext = &vk13Features};
 
     vkGetPhysicalDeviceFeatures2(device, &features2);
-    if (!vk13Features.dynamicRendering || !extDynamicState.extendedDynamicState || !features2.features.samplerAnisotropy)
+    if (!vk13Features.dynamicRendering || !extDynamicState.extendedDynamicState ||
+        !features2.features.samplerAnisotropy)
     {
         return 0;
     }
@@ -377,6 +378,21 @@ static uint32_t rate_device_suitability(VkPhysicalDevice device, VkSurfaceKHR su
     score += deviceProperties.limits.maxImageDimension2D;
 
     return score;
+}
+
+VkSampleCountFlagBits vkContextGetMaxUsableSampleCount(VkPhysicalDevice physicalDevice) {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(physicalDevice, &props);
+
+    // Both color and depth must support the count for use with MSAA rendering.
+    VkSampleCountFlags counts =
+        props.limits.framebufferColorSampleCounts &
+        props.limits.framebufferDepthSampleCounts;
+
+    if (counts & VK_SAMPLE_COUNT_8_BIT)  return VK_SAMPLE_COUNT_8_BIT;
+    if (counts & VK_SAMPLE_COUNT_4_BIT)  return VK_SAMPLE_COUNT_4_BIT;
+    if (counts & VK_SAMPLE_COUNT_2_BIT)  return VK_SAMPLE_COUNT_2_BIT;
+    return VK_SAMPLE_COUNT_1_BIT;
 }
 
 static VulkanResult pick_physical_device(VkContext* ctx, VkSurfaceKHR surface) {
@@ -416,6 +432,37 @@ static VulkanResult pick_physical_device(VkContext* ctx, VkSurfaceKHR surface) {
     VkPhysicalDeviceProperties deviceProperties;
     vkGetPhysicalDeviceProperties(ctx->physicalDevice, &deviceProperties);
     LOG_INFO("Selected Hardware: %s", deviceProperties.deviceName);
+
+    // Clamp the requested sample count to what the hardware can actually support.
+    VkSampleCountFlagBits requested = ctx->msaaSamples;
+    VkSampleCountFlagBits maxSupported = vkContextGetMaxUsableSampleCount(ctx->physicalDevice);
+
+    if (requested == VK_SAMPLE_COUNT_1_BIT) {
+        // MSAA explicitly disabled — leave as-is.
+        LOG_INFO("MSAA disabled.");
+    } else {
+        // Walk down from the requested count until we find one the hardware supports.
+        VkSampleCountFlagBits counts = deviceProperties.limits.framebufferColorSampleCounts
+                                     & deviceProperties.limits.framebufferDepthSampleCounts;
+        VkSampleCountFlagBits resolved = VK_SAMPLE_COUNT_1_BIT;
+        VkSampleCountFlagBits candidates[] = {
+            VK_SAMPLE_COUNT_64_BIT, VK_SAMPLE_COUNT_32_BIT,
+            VK_SAMPLE_COUNT_16_BIT, VK_SAMPLE_COUNT_8_BIT,
+            VK_SAMPLE_COUNT_4_BIT,  VK_SAMPLE_COUNT_2_BIT,
+        };
+        for (uint32_t i = 0; i < 6; i++) {
+            if (candidates[i] > requested) continue;  // above what was asked for
+            if (counts & candidates[i]) { resolved = candidates[i]; break; }
+        }
+        ctx->msaaSamples = resolved;
+        if (resolved != requested) {
+            LOG_WARN("Requested MSAA x%u is not supported; falling back to x%u.",
+                     (uint32_t)requested, (uint32_t)resolved);
+        } else {
+            LOG_INFO("MSAA x%u enabled.", (uint32_t)resolved);
+        }
+        (void)maxSupported;
+    }
 
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(ctx->physicalDevice, &queueFamilyCount, NULL);
@@ -580,7 +627,9 @@ static VulkanResult create_logical_device(VkContext* ctx) {
     VkPhysicalDeviceFeatures2 features2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .pNext = &indexingFeatures,
-        .features.samplerAnisotropy = VK_TRUE
+        .features.samplerAnisotropy = VK_TRUE,
+        .features.fillModeNonSolid = VK_TRUE,
+        .features.sampleRateShading = (ctx->msaaSamples > VK_SAMPLE_COUNT_1_BIT) ? VK_TRUE : VK_FALSE,
     };
 
     VkDeviceCreateInfo createInfo = {
@@ -643,77 +692,83 @@ static VulkanResult create_transfer_pool(VkContext* ctx) {
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
-static VulkanResult create_global_ssbo(VkContext* ctx) {
+static VulkanResult create_global_ssbo_ubo(VkContext* ctx) {
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(ctx->physicalDevice, &properties);
-    VkDeviceSize alignment = properties.limits.minStorageBufferOffsetAlignment;
 
+    // --- SSBO ---
+    VkDeviceSize ssboAlignment = properties.limits.minStorageBufferOffsetAlignment;
     VkDeviceSize rawSizePerFrame = sizeof(ObjectSSBO) * MAX_OBJECTS;
-    ctx->objectFrameStride = (rawSizePerFrame + alignment - 1) & ~(alignment - 1);
+    ctx->objectFrameStride = (rawSizePerFrame + ssboAlignment - 1) & ~(ssboAlignment - 1);
 
-    VkDeviceSize totalSize = ctx->objectFrameStride * MAX_FRAMES_IN_FLIGHT;
-
-    VkBufferCreateInfo bufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .pNext = NULL,
-        .size = totalSize,
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-
-    VmaAllocationCreateInfo allocInfo = {
-        .usage = VMA_MEMORY_USAGE_AUTO,
-        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | 
-                 VMA_ALLOCATION_CREATE_MAPPED_BIT
-    };
-
-    VmaAllocationInfo resultInfo;
-    VkResult vkRes = vmaCreateBuffer(
-        ctx->allocator, 
-        &bufferInfo, 
-        &allocInfo, 
-        &ctx->objectStorageBuffer, 
-        &ctx->objectStorageAllocation, 
-        &resultInfo
+    VulkanResult res = vkBufferCreate(
+        ctx,
+        ctx->objectFrameStride * MAX_FRAMES_IN_FLIGHT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        &ctx->objectStorageBuffer
     );
-
-    if (vkRes != VK_SUCCESS) {
-        LOG_ERROR("Failed to allocate global context SSBO via VMA.");
-        return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = vkRes};
+    if (res.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Failed to allocate global context SSBO via VulkanBuffer abstraction.");
+        return res;
     }
+    LOG_INFO("Global Context SSBO created successfully. Stride per frame: %lu bytes. Total: %lu bytes.",
+             (unsigned long)ctx->objectFrameStride,
+             (unsigned long)(ctx->objectFrameStride * MAX_FRAMES_IN_FLIGHT));
 
-    ctx->objectStorageMapped = resultInfo.pMappedData;
+    // --- UBO ---
+    VkDeviceSize uboAlignment = properties.limits.minUniformBufferOffsetAlignment;
+    ctx->uniformFrameStride = (sizeof(GlobalUBO) + uboAlignment - 1) & ~(uboAlignment - 1);
 
-    LOG_INFO("Global Context SSBO created successfully. Stride per frame: %lu bytes. Total: %lu bytes.", 
-             (unsigned long)ctx->objectFrameStride, (unsigned long)totalSize);
+    res = vkBufferCreate(
+        ctx,
+        ctx->uniformFrameStride * MAX_FRAMES_IN_FLIGHT,
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        &ctx->uniformBuffer
+    );
+    if (res.status != VULKAN_SUCCESS) {
+        LOG_ERROR("Failed to allocate global context UBO via VulkanBuffer abstraction.");
+        return res;
+    }
+    LOG_INFO("Global Context UBO created successfully. Stride per frame: %lu bytes. Total: %lu bytes.",
+             (unsigned long)ctx->uniformFrameStride,
+             (unsigned long)(ctx->uniformFrameStride * MAX_FRAMES_IN_FLIGHT));
 
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
 static VulkanResult create_descriptor_layouts(VkContext* ctx) {
-    // global set layout — binding 0: SSBO, binding 1: texture array, binding 2: sampler
-    VkDescriptorSetLayoutBinding globalBindings[3] = {
+    VkDescriptorSetLayoutBinding globalBindings[4] = {
         {
             .binding         = 0,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         },
         {
             .binding         = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding         = 2,
             .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
             .descriptorCount = MAX_TEXTURES,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
         },
         {
-            .binding         = 2,
+            .binding         = 3,
             .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
         },
     };
 
-    VkDescriptorBindingFlags bindingFlags[3] = {
+    // Only the texture array (binding 2) needs PARTIALLY_BOUND + UPDATE_AFTER_BIND.
+    VkDescriptorBindingFlags bindingFlags[4] = {
+        0,
         0,
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
@@ -721,14 +776,14 @@ static VulkanResult create_descriptor_layouts(VkContext* ctx) {
     };
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
-        .bindingCount  = 3,
+        .bindingCount  = 4,
         .pBindingFlags = bindingFlags,
     };
     VkDescriptorSetLayoutCreateInfo layoutInfo = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext        = &flagsInfo,
         .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
-        .bindingCount = 3,
+        .bindingCount = 4,
         .pBindings    = globalBindings,
     };
     VkResult result = vkCreateDescriptorSetLayout(ctx->logicalDevice, &layoutInfo, NULL, &ctx->globalSetLayout);
@@ -736,31 +791,12 @@ static VulkanResult create_descriptor_layouts(VkContext* ctx) {
         LOG_ERROR("vkCreateDescriptorSetLayout failed for global set. VkResult: %i", result);
         return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_SET_LAYOUT_CREATION_FAILED, .vk_result = result};
     }
-
-    // window set layout — binding 0: UBO (unchanged)
-    VkDescriptorSetLayoutBinding windowBindings[1] = {
-        {
-            .binding         = 0,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-    };
-    VkDescriptorSetLayoutCreateInfo windowLayoutInfo = {
-        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings    = windowBindings,
-    };
-    result = vkCreateDescriptorSetLayout(ctx->logicalDevice, &windowLayoutInfo, NULL, &ctx->windowSetLayout);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vkCreateDescriptorSetLayout failed for window set. VkResult: %i", result);
-        return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_SET_LAYOUT_CREATION_FAILED, .vk_result = result};
-    }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
 static VulkanResult create_descriptor_pool(VkContext* ctx) {
-    VkDescriptorPoolSize poolSizes[3] = {
+    VkDescriptorPoolSize poolSizes[4] = {
+        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT },
         { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT },
         { .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  .descriptorCount = MAX_TEXTURES * MAX_FRAMES_IN_FLIGHT },
         { .type = VK_DESCRIPTOR_TYPE_SAMPLER,        .descriptorCount = MAX_FRAMES_IN_FLIGHT },
@@ -769,7 +805,7 @@ static VulkanResult create_descriptor_pool(VkContext* ctx) {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .flags         = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
         .maxSets       = MAX_FRAMES_IN_FLIGHT,
-        .poolSizeCount = 3,
+        .poolSizeCount = 4,
         .pPoolSizes    = poolSizes,
     };
     VkResult result = vkCreateDescriptorPool(ctx->logicalDevice, &poolInfo, NULL, &ctx->globalDescriptorPool);
@@ -794,25 +830,41 @@ static VulkanResult create_frame_descriptors(VkContext* ctx) {
             return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_SET_ALLOCATION_FAILED, .vk_result = result};
         }
 
-        // binding 0: SSBO
+        // binding 0: UBO
+        VkDescriptorBufferInfo uboInfo = {
+            .buffer = ctx->uniformBuffer.buffer,
+            .offset = i * ctx->uniformFrameStride,
+            .range  = sizeof(GlobalUBO),
+        };
+
+        // binding 1: SSBO
         VkDescriptorBufferInfo ssboInfo = {
-            .buffer = ctx->objectStorageBuffer,
+            .buffer = ctx->objectStorageBuffer.buffer,
             .offset = i * ctx->objectFrameStride,
             .range  = sizeof(ObjectSSBO) * MAX_OBJECTS,
         };
 
-        // binding 2: sampler (written once here; textures written later via vkTextureRegister)
+        // binding 3: sampler (binding 2 / image array is written by vkTextureLoad as textures are added)
         VkDescriptorImageInfo samplerInfo = {
             .sampler     = ctx->globalSampler,
             .imageView   = VK_NULL_HANDLE,
             .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         };
 
-        VkWriteDescriptorSet writes[2] = {
+        VkWriteDescriptorSet writes[3] = {
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet          = ctx->globalDescriptorSets[i],
                 .dstBinding      = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo     = &uboInfo,
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = ctx->globalDescriptorSets[i],
+                .dstBinding      = 1,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
                 .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -821,14 +873,14 @@ static VulkanResult create_frame_descriptors(VkContext* ctx) {
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet          = ctx->globalDescriptorSets[i],
-                .dstBinding      = 2,
+                .dstBinding      = 3,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
                 .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER,
                 .pImageInfo      = &samplerInfo,
             },
         };
-        vkUpdateDescriptorSets(ctx->logicalDevice, 2, writes, 0, NULL);
+        vkUpdateDescriptorSets(ctx->logicalDevice, 3, writes, 0, NULL);
     }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
@@ -840,9 +892,9 @@ static VulkanResult create_global_sampler(VkContext* ctx) {
 
     VkSamplerCreateInfo samplerInfo = {
         .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter    = VK_FILTER_LINEAR,
-        .minFilter    = VK_FILTER_LINEAR,
-        .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .magFilter    = VK_FILTER_NEAREST,
+        .minFilter    = VK_FILTER_NEAREST,
+        .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST,
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
@@ -876,9 +928,9 @@ VulkanResult vkContextInitializeHardware(VkContext* ctx, VkSurfaceKHR surface) {
         LOG_ERROR("Transfer command pool creation failed. Status: %i", res.status);
         return res;
     }
-    res = create_global_ssbo(ctx);
+    res = create_global_ssbo_ubo(ctx);
     if (res.status != VULKAN_SUCCESS) {
-        LOG_ERROR("Hardware initialization aborted: Global SSBO creation failed.");
+        LOG_ERROR("Hardware initialization aborted: Global SSBO or UBO creation failed.");
         return res;
     }
     res = create_global_sampler(ctx);
@@ -906,10 +958,6 @@ VulkanResult vkContextInitializeHardware(VkContext* ctx, VkSurfaceKHR surface) {
 }
 
 VulkanResult vkContextCreate(VkContextCreateInfo* createInfo, VkContext* outCtx) {
-    if (outCtx->isInitialized) {
-        LOG_WARN("vkContextCreate called on an already initialized context!");
-        return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
-    }
     outCtx->instance = VK_NULL_HANDLE;
     outCtx->physicalDevice = VK_NULL_HANDLE;
     outCtx->logicalDevice = VK_NULL_HANDLE;
@@ -918,6 +966,9 @@ VulkanResult vkContextCreate(VkContextCreateInfo* createInfo, VkContext* outCtx)
     outCtx->presentationEnabled = createInfo->enablePresentation;
     outCtx->transferPool = VK_NULL_HANDLE;
     outCtx->textureCount = 0;
+    outCtx->msaaSamples  = createInfo->msaaSamples != 0
+                           ? createInfo->msaaSamples
+                           : VK_SAMPLE_COUNT_1_BIT;
 
     if (createInfo->enablePresentation) {
         if (!glfwInit()) {
@@ -950,7 +1001,6 @@ VulkanResult vkContextCreate(VkContextCreateInfo* createInfo, VkContext* outCtx)
         LOG_INFO("Vulkan Context running fully headless.");
     }
     LOG_INFO("Vulkan context created successfully.");
-    outCtx->isInitialized = true;
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -960,12 +1010,8 @@ void vkContextDestroy(VkContext* ctx) {
         vkDestroySampler(ctx->logicalDevice, ctx->globalSampler, NULL);
         ctx->globalSampler = VK_NULL_HANDLE;
     }
-    if (ctx->objectStorageBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(ctx->allocator, ctx->objectStorageBuffer, ctx->objectStorageAllocation);
-        ctx->objectStorageBuffer = VK_NULL_HANDLE;
-        ctx->objectStorageAllocation = VK_NULL_HANDLE;
-        ctx->objectStorageMapped = NULL;
-    }
+    vkBufferDestroy(ctx, &ctx->objectStorageBuffer);
+    vkBufferDestroy(ctx, &ctx->uniformBuffer);
     if (ctx->transferPool != VK_NULL_HANDLE) {
         vkDestroyCommandPool(ctx->logicalDevice, ctx->transferPool, NULL);
         ctx->transferPool = VK_NULL_HANDLE;
@@ -977,10 +1023,6 @@ void vkContextDestroy(VkContext* ctx) {
     if (ctx->globalSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(ctx->logicalDevice, ctx->globalSetLayout, NULL);
         ctx->globalSetLayout = VK_NULL_HANDLE;
-    }
-    if (ctx->windowSetLayout != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(ctx->logicalDevice, ctx->windowSetLayout, NULL);
-        ctx->windowSetLayout = VK_NULL_HANDLE;
     }
     if (ctx->allocator != VK_NULL_HANDLE) {
         vmaDestroyAllocator(ctx->allocator);
@@ -1001,5 +1043,4 @@ void vkContextDestroy(VkContext* ctx) {
     if (ctx->presentationEnabled) {
         glfwTerminate();
     }
-    ctx->isInitialized = false;
 }

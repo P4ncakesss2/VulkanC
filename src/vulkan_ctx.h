@@ -7,6 +7,7 @@
 #include <vulkan/vulkan.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "buffer.h"
 
 typedef enum VulkanStatus {
     VULKAN_STATUS_SWAPCHAIN_OUTDATED = 1,
@@ -55,7 +56,6 @@ typedef struct VKQueues {
     VkQueue graphics;
     VkQueue compute;
     VkQueue transfer;
-
     uint32_t graphicsFamilyIndex;
     uint32_t computeFamilyIndex;
     uint32_t transferFamilyIndex;
@@ -67,36 +67,34 @@ typedef struct VkContext {
     VkDevice logicalDevice;
     VkDebugUtilsMessengerEXT debugMessenger;
     VmaAllocator allocator;
-
     VkCommandPool transferPool;
-
     VKQueues queues;
     bool presentationEnabled;
-    bool isInitialized;
 
-    VkBuffer         objectStorageBuffer;
-    VmaAllocation    objectStorageAllocation;
-    void* objectStorageMapped;
-    VkDeviceSize     objectFrameStride;
+    VulkanBuffer objectStorageBuffer;
+    VkDeviceSize objectFrameStride;
+
+    VulkanBuffer uniformBuffer;
+    VkDeviceSize uniformFrameStride;
 
     VkDescriptorSetLayout globalSetLayout;
-    VkDescriptorSetLayout windowSetLayout;
-
-    VkDescriptorPool      globalDescriptorPool;
-    VkDescriptorSet       globalDescriptorSets[MAX_FRAMES_IN_FLIGHT];
-
-    VkSampler      globalSampler;
-    uint32_t       textureCount;
+    VkDescriptorPool globalDescriptorPool;
+    VkDescriptorSet globalDescriptorSets[MAX_FRAMES_IN_FLIGHT];
+    VkSampler globalSampler;
+    uint32_t textureCount;
+    VkSampleCountFlagBits msaaSamples;
 } VkContext;
 
 typedef struct VkContextCreateInfo {
-    const char* appName; 
+    const char* appName;
     bool validationLayers;
     bool enablePresentation;
+    VkSampleCountFlagBits msaaSamples;
 } VkContextCreateInfo;
 
 VulkanResult vkContextCreate(VkContextCreateInfo* createInfo, VkContext* outCtx);
 VulkanResult vkContextInitializeHardware(VkContext* ctx, VkSurfaceKHR surface);
 void vkContextDestroy(VkContext* ctx);
+VkSampleCountFlagBits vkContextGetMaxUsableSampleCount(VkPhysicalDevice physicalDevice);
 
 #endif

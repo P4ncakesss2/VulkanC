@@ -6,11 +6,11 @@
 typedef struct GlobalUBO {
     mat4  view;
     mat4  proj;
+    mat4 invProj;
     float time;
-    float _pad[3];
 } GlobalUBO;
 
-#define MAX_OBJECTS 1024
+#define MAX_OBJECTS 128
 
 typedef struct {
     mat4     transform;

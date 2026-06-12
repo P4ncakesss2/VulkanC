@@ -283,27 +283,6 @@ static VulkanResult create_frame_data(VkContext* ctx, VkWindow* window) {
             LOG_ERROR("vkCreateFence failed for render fence (frame %u). VkResult: %i", i, result);
             return (VulkanResult){.status = VULKAN_ERROR_FENCE_CREATION_FAILED, .vk_result = result};
         }
-
-        VkBufferCreateInfo uboInfo = {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size  = sizeof(GlobalUBO),
-            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        };
-        VmaAllocationCreateInfo uboAllocInfo = {
-            .usage = VMA_MEMORY_USAGE_AUTO,
-            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                     VMA_ALLOCATION_CREATE_MAPPED_BIT,
-        };
-        VmaAllocationInfo uboAllocResult;
-        result = vmaCreateBuffer(ctx->allocator, &uboInfo, &uboAllocInfo,
-            &window->frames[i].uniformBuffer,
-            &window->frames[i].uniformAllocation,
-            &uboAllocResult);
-        if (result != VK_SUCCESS) {
-            LOG_ERROR("vmaCreateBuffer failed for uniform buffer (frame %u). VkResult: %i", i, result);
-            return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
-        }
-        window->frames[i].uniformMapped = uboAllocResult.pMappedData;
     }
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
@@ -320,7 +299,7 @@ static VulkanResult create_depth_image(VkContext* ctx, VkWindow* window) {
         },
         .mipLevels     = 1,
         .arrayLayers   = 1,
-        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .samples       = ctx->msaaSamples,
         .tiling        = VK_IMAGE_TILING_OPTIMAL,
         .usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
@@ -357,6 +336,117 @@ static VulkanResult create_depth_image(VkContext* ctx, VkWindow* window) {
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
+static VulkanResult create_msaa_color_image(VkContext* ctx, VkWindow* window) {
+    VkImageCreateInfo imageInfo = {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType     = VK_IMAGE_TYPE_2D,
+        .format        = window->swapChainSurfaceFormat.format,
+        .extent        = {
+            .width     = window->swapChainExtent.width,
+            .height    = window->swapChainExtent.height,
+            .depth     = 1,
+        },
+        .mipLevels     = 1,
+        .arrayLayers   = 1,
+        .samples       = ctx->msaaSamples,
+        .tiling        = VK_IMAGE_TILING_OPTIMAL,
+        .usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                         VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+        .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    VmaAllocationCreateInfo allocInfo = {
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+    };
+    VkResult result = vmaCreateImage(ctx->allocator, &imageInfo, &allocInfo,
+        &window->msaaColorImage, &window->msaaColorAllocation, NULL);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("vmaCreateImage failed for MSAA color image. VkResult: %i", result);
+        return (VulkanResult){.status = VULKAN_ERROR_IMAGE_CREATION_FAILED, .vk_result = result};
+    }
+
+    VkImageViewCreateInfo viewInfo = {
+        .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image    = window->msaaColorImage,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format   = window->swapChainSurfaceFormat.format,
+        .subresourceRange = {
+            .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel   = 0,
+            .levelCount     = 1,
+            .baseArrayLayer = 0,
+            .layerCount     = 1,
+        },
+    };
+    result = vkCreateImageView(ctx->logicalDevice, &viewInfo, NULL, &window->msaaColorImageView);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("vkCreateImageView failed for MSAA color image. VkResult: %i", result);
+        vmaDestroyImage(ctx->allocator, window->msaaColorImage, window->msaaColorAllocation);
+        window->msaaColorImage      = VK_NULL_HANDLE;
+        window->msaaColorAllocation = VK_NULL_HANDLE;
+        return (VulkanResult){.status = VULKAN_ERROR_IMAGE_VIEW_CREATION_FAILED, .vk_result = result};
+    }
+
+    VkCommandBufferAllocateInfo cmdAllocInfo = {
+        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool        = ctx->transferPool,
+        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer cmd;
+    result = vkAllocateCommandBuffers(ctx->logicalDevice, &cmdAllocInfo, &cmd);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("vkAllocateCommandBuffers failed for MSAA layout transition. VkResult: %i", result);
+        return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED, .vk_result = result};
+    }
+
+    VkCommandBufferBeginInfo beginInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    VkImageMemoryBarrier2 barrier = {
+        .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask     = VK_PIPELINE_STAGE_2_NONE,
+        .srcAccessMask    = VK_ACCESS_2_NONE,
+        .dstStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image            = window->msaaColorImage,
+        .subresourceRange = {
+            .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel   = 0,
+            .levelCount     = 1,
+            .baseArrayLayer = 0,
+            .layerCount     = 1,
+        },
+    };
+    VkDependencyInfo dep = {
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &barrier,
+    };
+    vkCmdPipelineBarrier2(cmd, &dep);
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo submitInfo = {
+        .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers    = &cmd,
+    };
+
+    vkQueueSubmit(ctx->queues.graphics, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->queues.graphics);
+    vkFreeCommandBuffers(ctx->logicalDevice, ctx->transferPool, 1, &cmd);
+
+    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
+}
+
 static void cleanup_swapchain(VkContext* ctx, VkWindow* window) {
     if (window->imageData != NULL) {
         for (uint32_t i = 0; i < window->swapChainImageCount; i++) {
@@ -381,6 +471,15 @@ static void cleanup_swapchain(VkContext* ctx, VkWindow* window) {
         window->depthImage     = VK_NULL_HANDLE;
         window->depthAllocation = VK_NULL_HANDLE;
     }
+    if (window->msaaColorImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(ctx->logicalDevice, window->msaaColorImageView, NULL);
+        window->msaaColorImageView = VK_NULL_HANDLE;
+    }
+    if (window->msaaColorImage != VK_NULL_HANDLE) {
+        vmaDestroyImage(ctx->allocator, window->msaaColorImage, window->msaaColorAllocation);
+        window->msaaColorImage      = VK_NULL_HANDLE;
+        window->msaaColorAllocation = VK_NULL_HANDLE;
+    }
     if (window->swapChainImageViews != NULL) {
         for (uint32_t i = 0; i < window->swapChainImageViewCount; i++) {
             if (window->swapChainImageViews[i] != VK_NULL_HANDLE) {
@@ -398,59 +497,6 @@ static void cleanup_swapchain(VkContext* ctx, VkWindow* window) {
         vkDestroySwapchainKHR(ctx->logicalDevice, window->swapChain, NULL);
         window->swapChain = VK_NULL_HANDLE;
     }
-}
-
-static VulkanResult create_descriptor_pool(VkContext* ctx, VkWindow* window) {
-    VkDescriptorPoolSize poolSizes[1] = {
-        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT },
-    };
-    VkDescriptorPoolCreateInfo poolInfo = {
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = MAX_FRAMES_IN_FLIGHT,
-        .poolSizeCount = 1,
-        .pPoolSizes    = poolSizes,
-    };
-    VkResult result = vkCreateDescriptorPool(ctx->logicalDevice, &poolInfo, NULL, &window->windowDescriptorPool);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vkCreateDescriptorPool failed. VkResult: %i", result);
-        return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_POOL_CREATION_FAILED, .vk_result = result};
-    }
-    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
-}
-
-static VulkanResult create_frame_descriptors(VkContext* ctx, VkWindow* window) {
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorSetAllocateInfo allocInfo = {
-            .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool     = window->windowDescriptorPool,
-            .descriptorSetCount = 1,
-            .pSetLayouts        = &ctx->windowSetLayout,
-        };
-        VkResult result = vkAllocateDescriptorSets(ctx->logicalDevice, &allocInfo, &window->windowDescriptorSets[i]);
-        if (result != VK_SUCCESS) {
-            LOG_ERROR("vkAllocateDescriptorSets failed for frame %u. VkResult: %i", i, result);
-            return (VulkanResult){.status = VULKAN_ERROR_DESCRIPTOR_SET_ALLOCATION_FAILED, .vk_result = result};
-        }
-
-        VkDescriptorBufferInfo uboInfo = {
-            .buffer = window->frames[i].uniformBuffer,
-            .offset = 0,
-            .range  = sizeof(GlobalUBO),
-        };
-        VkWriteDescriptorSet writes[1] = {
-            {
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = window->windowDescriptorSets[i],
-                .dstBinding      = 0,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .pBufferInfo     = &uboInfo,
-            },
-        };
-        vkUpdateDescriptorSets(ctx->logicalDevice, 1, writes, 0, NULL);
-    }
-    return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
 VulkanResult vkWindowRecreateSwapchain(VkContext* ctx, VkWindow* window) {
@@ -491,6 +537,12 @@ VulkanResult vkWindowRecreateSwapchain(VkContext* ctx, VkWindow* window) {
         vkWindowDestroy(ctx, window);
         return result;
     }
+    result = create_msaa_color_image(ctx, window);
+    if (result.status != VULKAN_SUCCESS) {
+        LOG_ERROR("MSAA color image creation failed.");
+        vkWindowDestroy(ctx, window);
+        return result;
+    }
     result = create_render_semaphores(ctx, window);
     if (result.status != VULKAN_SUCCESS) {
         LOG_ERROR("Render semaphore recreation failed. Status: %i", result.status);
@@ -514,10 +566,6 @@ static void framebufferResizeCallback(GLFWwindow* handle, int width, int height)
 }
 
 VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo, VkWindow* outWindow) {
-    if (outWindow->isInitialized) {
-        LOG_WARN("vkWindowCreate called on an already initialized window!");
-        return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
-    }
     if (!ctx->presentationEnabled) {
         LOG_ERROR("Cannot create a window! The VulkanContext was initialized with presentationEnabled = false.");
         return (VulkanResult){.status = VULKAN_ERROR_PRESENTATION_NOT_ENABLED, .vk_result = VK_ERROR_UNKNOWN};
@@ -530,20 +578,20 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
     outWindow->swapChainImageViews = NULL;
     outWindow->frameIndex = 0;
     outWindow->framebufferResized = false;
-    outWindow->isInitialized = false;
     outWindow->renderSemaphores = NULL;
     outWindow->imageData = NULL;
 
     outWindow->depthImage     = VK_NULL_HANDLE;
     outWindow->depthImageView = VK_NULL_HANDLE;
     outWindow->depthAllocation = VK_NULL_HANDLE;
+
+    outWindow->msaaColorImage      = VK_NULL_HANDLE;
+    outWindow->msaaColorImageView  = VK_NULL_HANDLE;
+    outWindow->msaaColorAllocation = VK_NULL_HANDLE;
     
     for(uint32_t i=0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         outWindow->frames[i].presentSemaphore = VK_NULL_HANDLE;
         outWindow->frames[i].renderFence = VK_NULL_HANDLE;
-        outWindow->frames[i].uniformBuffer     = VK_NULL_HANDLE;
-        outWindow->frames[i].uniformAllocation = VK_NULL_HANDLE;
-        outWindow->frames[i].uniformMapped     = NULL;
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -594,6 +642,12 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
         vkWindowDestroy(ctx, outWindow);
         return result;
     }
+    result = create_msaa_color_image(ctx, outWindow);
+    if (result.status != VULKAN_SUCCESS) {
+        LOG_ERROR("MSAA color image creation failed.");
+        vkWindowDestroy(ctx, outWindow);
+        return result;
+    }
     result = create_render_semaphores(ctx, outWindow);
     if (result.status != VULKAN_SUCCESS) {
         LOG_ERROR("Render semaphore creation failed.");
@@ -612,19 +666,6 @@ VulkanResult vkWindowCreate(VkContext* ctx, const VkWindowCreateInfo* createInfo
         vkWindowDestroy(ctx, outWindow);
         return result;
     }
-    result = create_descriptor_pool(ctx, outWindow);
-    if (result.status != VULKAN_SUCCESS) {
-        LOG_ERROR("descriptor pool creation failed.");
-        vkWindowDestroy(ctx, outWindow);
-        return result;
-    }
-    result = create_frame_descriptors(ctx, outWindow);
-    if (result.status != VULKAN_SUCCESS) {
-        LOG_ERROR("descriptor sets creation failed.");
-        vkWindowDestroy(ctx, outWindow);
-        return result;
-    }
-    outWindow->isInitialized = true;
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
@@ -634,19 +675,10 @@ bool vkWindowShouldClose(VkWindow* window) {
     return glfwWindowShouldClose(window->handle);
 }
 
-void vkPollEvents() {
-    glfwPollEvents();
-}
-
 void vkWindowDestroy(VkContext* ctx, VkWindow* window) {
     if (window == NULL) return;
 
     cleanup_swapchain(ctx, window);
-
-    if (window->windowDescriptorPool != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(ctx->logicalDevice, window->windowDescriptorPool, NULL);
-        window->windowDescriptorPool = VK_NULL_HANDLE;
-    }
 
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (window->frames[i].presentSemaphore != VK_NULL_HANDLE) {
@@ -654,10 +686,6 @@ void vkWindowDestroy(VkContext* ctx, VkWindow* window) {
         }
         if (window->frames[i].renderFence != VK_NULL_HANDLE) {
             vkDestroyFence(ctx->logicalDevice, window->frames[i].renderFence, NULL);
-        }
-        if (window->frames[i].uniformBuffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(ctx->allocator, window->frames[i].uniformBuffer, window->frames[i].uniformAllocation);
-            window->frames[i].uniformBuffer = VK_NULL_HANDLE;
         }
     }
 
@@ -679,5 +707,4 @@ void vkWindowDestroy(VkContext* ctx, VkWindow* window) {
         glfwDestroyWindow(window->handle);
         window->handle = NULL;
     }
-    window->isInitialized = false;
 }

@@ -11,7 +11,7 @@ VkVertexInputBindingDescription vkVertexGetBindingDescription() {
     return bindingDesc;
 }
 
-void vkVertexGetAttributeDescription(VkVertexInputAttributeDescription attributes[3]) {
+void vkVertexGetAttributeDescription(VkVertexInputAttributeDescription attributes[4]) {
     // position
     attributes[0].location = 0;
     attributes[0].binding  = 0;
@@ -24,11 +24,17 @@ void vkVertexGetAttributeDescription(VkVertexInputAttributeDescription attribute
     attributes[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
     attributes[1].offset   = offsetof(Vertex, color);
 
-    // uv
+    // normal 
     attributes[2].location = 2;
     attributes[2].binding  = 0;
-    attributes[2].format   = VK_FORMAT_R32G32_SFLOAT;
-    attributes[2].offset   = offsetof(Vertex, uv);
+    attributes[2].format   = VK_FORMAT_R32G32B32_SFLOAT;
+    attributes[2].offset   = offsetof(Vertex, normal);
+
+    // uv
+    attributes[3].location = 3;
+    attributes[3].binding  = 0;
+    attributes[3].format   = VK_FORMAT_R32G32_SFLOAT;
+    attributes[3].offset   = offsetof(Vertex, uv);
 }
 
 VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* outMesh) {
@@ -36,51 +42,28 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
     VkDeviceSize indexSize  = sizeof(uint32_t) * createInfo->indexCount;
     VkDeviceSize totalSize  = vertexSize + indexSize;
 
-    // staging buffer
-    VkBufferCreateInfo stagingBufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size  = totalSize,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-    };
-    VmaAllocationCreateInfo stagingAllocInfo = {
-        .usage = VMA_MEMORY_USAGE_AUTO,
-        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                 VMA_ALLOCATION_CREATE_MAPPED_BIT,
-    };
-    VkBuffer      stagingBuffer;
-    VmaAllocation stagingAllocation;
-    VmaAllocationInfo stagingAllocResult;
-    VkResult result = vmaCreateBuffer(ctx->allocator, &stagingBufferInfo, &stagingAllocInfo,
-        &stagingBuffer, &stagingAllocation, &stagingAllocResult);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vmaCreateBuffer failed for staging buffer. VkResult: %i", result);
-        return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
+    VulkanBuffer stagingBuffer;
+    VulkanResult res = vkBufferCreate(
+        ctx, totalSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        &stagingBuffer
+    );
+    if (res.status != VULKAN_SUCCESS) return res;
+
+    memcpy(stagingBuffer.mappedData, createInfo->vertexArray, vertexSize);
+    memcpy((char*)stagingBuffer.mappedData + vertexSize, createInfo->indexArray, indexSize);
+
+    res = vkBufferCreate(
+        ctx, totalSize, 
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT, 
+        &outMesh->buffer
+    );
+    if (res.status != VULKAN_SUCCESS) {
+        vkBufferDestroy(ctx, &stagingBuffer);
+        return res;
     }
 
-    memcpy(stagingAllocResult.pMappedData, createInfo->vertexArray, vertexSize);
-    memcpy((char*)stagingAllocResult.pMappedData + vertexSize, createInfo->indexArray, indexSize);
-
-    // device-local buffer
-    VkBufferCreateInfo deviceBufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size  = totalSize,
-        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT  |
-                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-    };
-    VmaAllocationCreateInfo deviceAllocInfo = {
-        .usage = VMA_MEMORY_USAGE_AUTO,
-        .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
-    };
-    result = vmaCreateBuffer(ctx->allocator, &deviceBufferInfo, &deviceAllocInfo,
-        &outMesh->buffer, &outMesh->allocation, NULL);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vmaCreateBuffer failed for device buffer. VkResult: %i", result);
-        vmaDestroyBuffer(ctx->allocator, stagingBuffer, stagingAllocation);
-        return (VulkanResult){.status = VULKAN_ERROR_BUFFER_CREATION_FAILED, .vk_result = result};
-    }
-
-    // upload
     VkCommandBufferAllocateInfo cmdAllocInfo = {
         .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool        = ctx->transferPool,
@@ -88,12 +71,12 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
         .commandBufferCount = 1,
     };
     VkCommandBuffer cmd;
-    result = vkAllocateCommandBuffers(ctx->logicalDevice, &cmdAllocInfo, &cmd);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("vkAllocateCommandBuffers failed for transfer. VkResult: %i", result);
-        vmaDestroyBuffer(ctx->allocator, stagingBuffer, stagingAllocation);
-        vmaDestroyBuffer(ctx->allocator, outMesh->buffer, outMesh->allocation);
-        return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED, .vk_result = result};
+    VkResult vkRes = vkAllocateCommandBuffers(ctx->logicalDevice, &cmdAllocInfo, &cmd);
+    if (vkRes != VK_SUCCESS) {
+        LOG_ERROR("vkAllocateCommandBuffers failed for transfer. VkResult: %i", vkRes);
+        vkBufferDestroy(ctx, &stagingBuffer);
+        vkBufferDestroy(ctx, &outMesh->buffer);
+        return (VulkanResult){.status = VULKAN_ERROR_COMMAND_BUFFER_ALLOCATION_FAILED, .vk_result = vkRes};
     }
 
     VkCommandBufferBeginInfo beginInfo = {
@@ -102,7 +85,7 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
     };
     vkBeginCommandBuffer(cmd, &beginInfo);
     VkBufferCopy region = { .srcOffset = 0, .dstOffset = 0, .size = totalSize };
-    vkCmdCopyBuffer(cmd, stagingBuffer, outMesh->buffer, 1, &region);
+    vkCmdCopyBuffer(cmd, stagingBuffer.buffer, outMesh->buffer.buffer, 1, &region);
     vkEndCommandBuffer(cmd);
 
     VkSubmitInfo submitInfo = {
@@ -113,23 +96,23 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
     vkQueueSubmit(ctx->queues.transfer, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(ctx->queues.transfer);
     vkFreeCommandBuffers(ctx->logicalDevice, ctx->transferPool, 1, &cmd);
-    vmaDestroyBuffer(ctx->allocator, stagingBuffer, stagingAllocation);
+    
+    vkBufferDestroy(ctx, &stagingBuffer);
 
     outMesh->vertexCount = createInfo->vertexCount;
     outMesh->indexCount  = createInfo->indexCount;
     outMesh->indexOffset = vertexSize;
-    outMesh->textureID   = createInfo->textureID;
 
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
 void vkMeshDraw(VkMesh* mesh, VkCommandBuffer cmd, uint32_t firstInstance) {
     VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->buffer, &offset);
-    vkCmdBindIndexBuffer(cmd, mesh->buffer, mesh->indexOffset, VK_INDEX_TYPE_UINT32);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->buffer.buffer, &offset);
+    vkCmdBindIndexBuffer(cmd, mesh->buffer.buffer, mesh->indexOffset, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, firstInstance);
 }
 
 void vkMeshDestroy(VkContext* ctx, VkMesh* mesh) {
-    vmaDestroyBuffer(ctx->allocator, mesh->buffer, mesh->allocation);
+    vkBufferDestroy(ctx, &mesh->buffer);
 }
