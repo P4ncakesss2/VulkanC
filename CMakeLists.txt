@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(VulkanC C CXX)
 
-set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -57,4 +57,14 @@ target_link_libraries(VulkanC PRIVATE
         glfw
         cglm
         GPUOpen::VulkanMemoryAllocator
+)
+
+add_custom_command(TARGET VulkanC POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+        "$<TARGET_FILE_DIR:VulkanC>/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+        "$<TARGET_FILE_DIR:VulkanC>/shaders"
+    COMMENT "Copying assets and shaders to target directory..."
 )

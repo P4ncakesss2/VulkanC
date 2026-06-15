@@ -3,13 +3,11 @@
 
 #include <stdio.h>
 
-// ANSI Terminal Color Codes
 #define LOG_COLOR_GREEN  "\033[0;32m"
 #define LOG_COLOR_YELLOW "\033[0;33m"
 #define LOG_COLOR_RED    "\033[0;31m"
 #define LOG_COLOR_RESET  "\033[0m"
 
-// Core Macros using Variadic Arguments (__VA_ARGS__)
 #define LOG_INFO(fmt, ...) \
     printf(LOG_COLOR_GREEN "[INFO] " LOG_COLOR_RESET fmt "\n", ##__VA_ARGS__)
 

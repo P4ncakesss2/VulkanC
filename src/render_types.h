@@ -2,20 +2,28 @@
 #define RENDER_TYPES_H
 
 #include "cglm/cglm.h"
+#include "mesh.h"
+#include "material.h"
 
 typedef struct GlobalUBO {
-    mat4  view;
-    mat4  proj;
-    mat4 invProj;
     float time;
 } GlobalUBO;
 
-#define MAX_OBJECTS 128
+#define MAX_OBJECTS 1024
 
-typedef struct {
-    mat4     transform;
-    uint32_t textureID;
-    uint32_t pad[3];
+typedef struct ObjectSSBO {
+    mat4  transform;
+    vec3  local_min;
+    float pad0;
+    vec3  local_max; 
+    float pad1;
 } ObjectSSBO;
+
+typedef struct RenderObject {
+    VkMesh* mesh;
+    VkMaterial* material;
+    mat4        transform;
+    uint32_t    textureID;
+} RenderObject;
 
 #endif

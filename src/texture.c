@@ -446,7 +446,7 @@ VulkanResult vkTextureCreateCubemap(VkContext* ctx, const char* paths[6], VkText
         vmaDestroyImage(ctx->allocator, out->image, out->allocation);
         return (VulkanResult){.status = VULKAN_ERROR_IMAGE_VIEW_CREATION_FAILED, .vk_result = result};
     }
-
+    LOG_INFO("Cubemap loaded: %s [and 5 other faces] (%ux%u, %u mip levels)", paths[0], out->width, out->height, mipLevels);
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 

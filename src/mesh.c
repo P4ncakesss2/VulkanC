@@ -2,43 +2,44 @@
 #include "logger.h"
 #include <string.h>
 
-VkVertexInputBindingDescription vkVertexGetBindingDescription() {
-    VkVertexInputBindingDescription bindingDesc = {
+VkVertexInputBindingDescription vkVertexGetBindingDescription(void) {
+    return (VkVertexInputBindingDescription){
         .binding   = 0,
         .stride    = sizeof(Vertex),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
     };
-    return bindingDesc;
 }
 
 void vkVertexGetAttributeDescription(VkVertexInputAttributeDescription attributes[4]) {
-    // position
-    attributes[0].location = 0;
-    attributes[0].binding  = 0;
-    attributes[0].format   = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[0].offset   = offsetof(Vertex, position);
+    attributes[0] = (VkVertexInputAttributeDescription){ .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, position) };
+    attributes[1] = (VkVertexInputAttributeDescription){ .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, color)    };
+    attributes[2] = (VkVertexInputAttributeDescription){ .location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)   };
+    attributes[3] = (VkVertexInputAttributeDescription){ .location = 3, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,    .offset = offsetof(Vertex, uv)       };
+}
 
-    // color
-    attributes[1].location = 1;
-    attributes[1].binding  = 0;
-    attributes[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[1].offset   = offsetof(Vertex, color);
+void calculate_mesh_bounds(const Vertex* vertices, uint32_t vertexCount, vec3 out_min, vec3 out_max) {
+    if (vertexCount == 0) {
+        glm_vec3_zero(out_min);
+        glm_vec3_zero(out_max);
+        return;
+    }
 
-    // normal 
-    attributes[2].location = 2;
-    attributes[2].binding  = 0;
-    attributes[2].format   = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[2].offset   = offsetof(Vertex, normal);
+    glm_vec3_copy(vertices[0].position, out_min);
+    glm_vec3_copy(vertices[0].position, out_max);
 
-    // uv
-    attributes[3].location = 3;
-    attributes[3].binding  = 0;
-    attributes[3].format   = VK_FORMAT_R32G32_SFLOAT;
-    attributes[3].offset   = offsetof(Vertex, uv);
+    for (uint32_t i = 1; i < vertexCount; i++) {
+        out_min[0] = fminf(out_min[0], vertices[i].position[0]);
+        out_min[1] = fminf(out_min[1], vertices[i].position[1]);
+        out_min[2] = fminf(out_min[2], vertices[i].position[2]);
+
+        out_max[0] = fmaxf(out_max[0], vertices[i].position[0]);
+        out_max[1] = fmaxf(out_max[1], vertices[i].position[1]);
+        out_max[2] = fmaxf(out_max[2], vertices[i].position[2]);
+    }
 }
 
 VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* outMesh) {
-    VkDeviceSize vertexSize = sizeof(Vertex) * createInfo->vertexCount;
+    VkDeviceSize vertexSize = sizeof(Vertex)   * createInfo->vertexCount;
     VkDeviceSize indexSize  = sizeof(uint32_t) * createInfo->indexCount;
     VkDeviceSize totalSize  = vertexSize + indexSize;
 
@@ -54,9 +55,9 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
     memcpy((char*)stagingBuffer.mappedData + vertexSize, createInfo->indexArray, indexSize);
 
     res = vkBufferCreate(
-        ctx, totalSize, 
+        ctx, totalSize,
         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT, 
+        VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
         &outMesh->buffer
     );
     if (res.status != VULKAN_SUCCESS) {
@@ -96,20 +97,25 @@ VulkanResult vkMeshCreate(VkContext* ctx, VkMeshCreateInfo* createInfo, VkMesh* 
     vkQueueSubmit(ctx->queues.transfer, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(ctx->queues.transfer);
     vkFreeCommandBuffers(ctx->logicalDevice, ctx->transferPool, 1, &cmd);
-    
+
     vkBufferDestroy(ctx, &stagingBuffer);
 
     outMesh->vertexCount = createInfo->vertexCount;
     outMesh->indexCount  = createInfo->indexCount;
     outMesh->indexOffset = vertexSize;
 
+    calculate_mesh_bounds(createInfo->vertexArray, createInfo->vertexCount, outMesh->local_min, outMesh->local_max);
+
     return (VulkanResult){.status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS};
 }
 
-void vkMeshDraw(VkMesh* mesh, VkCommandBuffer cmd, uint32_t firstInstance) {
+void vkMeshBind(VkMesh* mesh, VkCommandBuffer cmd) {
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->buffer.buffer, &offset);
     vkCmdBindIndexBuffer(cmd, mesh->buffer.buffer, mesh->indexOffset, VK_INDEX_TYPE_UINT32);
+}
+
+void vkMeshDraw(VkMesh* mesh, VkCommandBuffer cmd, uint32_t firstInstance) {
     vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, firstInstance);
 }
 
