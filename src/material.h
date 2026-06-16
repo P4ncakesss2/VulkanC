@@ -2,15 +2,14 @@
 #define VK_MATERIAL_H
 
 #include "vulkan_ctx.h"
-#include "buffer.h"
 #include "renderer.h"
 #include "spirv_reflect.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
-#define MATERIAL_MAX_BINDINGS  16
 #define MATERIAL_MAX_PARAMS    64
+#define MATERIAL_MAX_BINDINGS  16
 #define MATERIAL_NAME_MAX      64
 
 typedef enum MaterialParamType {
@@ -26,13 +25,13 @@ typedef enum MaterialParamType {
 typedef struct MaterialParamValue {
     MaterialParamType type;
     union {
-        float     f;
-        float     f2[2];
-        float     f3[3];
-        float     f4[4];
-        int32_t   i;
-        uint32_t  u;
-        float     mat4[16];
+        float    f;
+        float    f2[2];
+        float    f3[3];
+        float    f4[4];
+        int32_t  i;
+        uint32_t u;
+        float    mat4[16];
     };
 } MaterialParamValue;
 
@@ -44,7 +43,7 @@ static inline MaterialParamValue mpInt   (int32_t v)                          { 
 static inline MaterialParamValue mpUint  (uint32_t v)                         { return (MaterialParamValue){.type=MATERIAL_PARAM_UINT,   .u=v}; }
 
 typedef struct MaterialFieldDesc {
-    const char* name;
+    const char*       name;
     uint32_t          offset;
     MaterialParamType type;
 } MaterialFieldDesc;
@@ -60,37 +59,17 @@ typedef struct MaterialParamEntry {
     uint32_t          size;
 } MaterialParamEntry;
 
-typedef struct MaterialUBOBuffer {
-    uint32_t     binding;
-    uint8_t* data;
-    uint32_t     totalSize;
-    VulkanBuffer gpuBuffers[MAX_FRAMES_IN_FLIGHT];
-} MaterialUBOBuffer;
-
-typedef struct VkMaterial {
-    VkPipeline       pipelines[PASS_TYPE_COUNT];
-    VkPipelineLayout pipelineLayouts[PASS_TYPE_COUNT];
-    bool             isCompute; 
-
-    VkDescriptorSetLayout setLayout;
-    VkDescriptorPool      pool;
-    VkDescriptorSet       sets[MAX_FRAMES_IN_FLIGHT];
-    bool                  hasSet;
-
-    MaterialParamEntry params[MATERIAL_MAX_PARAMS];
-    uint32_t           paramCount;
-
-    MaterialUBOBuffer  uboBuffers[MATERIAL_MAX_BINDINGS];
-    uint32_t           uboCount;
-
-    bool               needsFlush[MAX_FRAMES_IN_FLIGHT];
-} VkMaterial;
+typedef struct MaterialUBODef {
+    uint32_t binding;
+    uint32_t size;
+    uint8_t  data[4096];
+} MaterialUBODef;
 
 typedef struct VkShaderStageCreateInfo {
     VkShaderStageFlagBits stage;
-    VkPassType              pass;
-    const char* path;
-    const char* entryName;
+    VkPassType            pass;
+    const char*           path;
+    const char*           entryName;
 } VkShaderStageCreateInfo;
 
 typedef struct VkPipelineBuilder {
@@ -120,36 +99,26 @@ typedef struct VkPipelineBuilder {
     VkFormat depthFormat;
 } VkPipelineBuilder;
 
+typedef struct VkMaterial {
+    VkPipelineBuilder builder;
+
+    MaterialParamEntry params[MATERIAL_MAX_PARAMS];
+    uint32_t           paramCount;
+
+    MaterialUBODef uboParams;
+} VkMaterial;
+
 VkPipelineBuilder vkPipelineBuilderCreateDefault(void);
 
-VulkanResult vkMaterialBuildDescriptorSet(VkContext* ctx,
-                                           VkPipelineBuilder* builder,
-                                           VkMaterial* mat);
-
-VulkanResult vkMaterialBuildForPass(VkContext* ctx,
-                                     VkRenderer* renderer,
-                                     VkPipelineBuilder* builder,
-                                     VkPassType passType,
-                                     VkMaterial* mat);
-
-VulkanResult vkMaterialBuild(VkContext* ctx,
-                              VkRenderer* renderer,
-                              VkPipelineBuilder* builder,
-                              VkMaterial* out);
-
-void vkMaterialDestroy(VkContext* ctx, VkMaterial* material);
-
-void vkMaterialBindPipeline(VkCommandBuffer cmd, VkMaterial* material, VkPassType passType);
-
-VkPipelineBindPoint vkMaterialGetBindPoint(VkMaterial* material);
-
+void vkMaterialInit(VkMaterial* mat, const VkPipelineBuilder* builder);
 bool vkMaterialSetParam(VkMaterial* mat, const char* name, MaterialParamValue value);
 void vkMaterialSetParams(VkMaterial* mat, const void* srcStruct,
                          const MaterialFieldDesc* fields, uint32_t fieldCount);
-void vkMaterialFlush(VkMaterial* mat, VkDevice device, uint32_t frameIndex);
 
-static inline bool vkMaterialSupportsPass(const VkMaterial* mat, VkPassType passType) {
-    return mat->pipelines[passType] != VK_NULL_HANDLE;
+static inline bool vkMaterialHasParam(const VkMaterial* mat, const char* name) {
+    for (uint32_t i = 0; i < mat->paramCount; i++)
+        if (strncmp(mat->params[i].name, name, MATERIAL_NAME_MAX) == 0) return true;
+    return false;
 }
 
 #endif

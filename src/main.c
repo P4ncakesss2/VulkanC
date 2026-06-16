@@ -7,6 +7,7 @@
 #include "material.h"
 #include "renderer.h"
 #include "geometry_pass.h"
+#include "cull_pass.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -40,10 +41,10 @@ static void process_input(GLFWwindow* win, float dt) {
         glfwSetWindowShouldClose(win, true);
     float speed = 5.0f * dt;
     vec3 tmp;
-    if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) { glm_vec3_scale(s_cameraFront, speed, tmp); glm_vec3_add(s_cameraPos, tmp, s_cameraPos); }
-    if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) { glm_vec3_scale(s_cameraFront, speed, tmp); glm_vec3_sub(s_cameraPos, tmp, s_cameraPos); }
-    if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) { glm_vec3_cross(s_cameraFront, s_cameraUp, tmp); glm_vec3_normalize(tmp); glm_vec3_scale(tmp, speed, tmp); glm_vec3_sub(s_cameraPos, tmp, s_cameraPos); }
-    if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) { glm_vec3_cross(s_cameraFront, s_cameraUp, tmp); glm_vec3_normalize(tmp); glm_vec3_scale(tmp, speed, tmp); glm_vec3_add(s_cameraPos, tmp, s_cameraPos); }
+    if (glfwGetKey(win, GLFW_KEY_W)          == GLFW_PRESS) { glm_vec3_scale(s_cameraFront, speed, tmp); glm_vec3_add(s_cameraPos, tmp, s_cameraPos); }
+    if (glfwGetKey(win, GLFW_KEY_S)          == GLFW_PRESS) { glm_vec3_scale(s_cameraFront, speed, tmp); glm_vec3_sub(s_cameraPos, tmp, s_cameraPos); }
+    if (glfwGetKey(win, GLFW_KEY_A)          == GLFW_PRESS) { glm_vec3_cross(s_cameraFront, s_cameraUp, tmp); glm_vec3_normalize(tmp); glm_vec3_scale(tmp, speed, tmp); glm_vec3_sub(s_cameraPos, tmp, s_cameraPos); }
+    if (glfwGetKey(win, GLFW_KEY_D)          == GLFW_PRESS) { glm_vec3_cross(s_cameraFront, s_cameraUp, tmp); glm_vec3_normalize(tmp); glm_vec3_scale(tmp, speed, tmp); glm_vec3_add(s_cameraPos, tmp, s_cameraPos); }
     if (glfwGetKey(win, GLFW_KEY_SPACE)      == GLFW_PRESS) { glm_vec3_scale(s_cameraUp, speed, tmp); glm_vec3_add(s_cameraPos, tmp, s_cameraPos); }
     if (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) { glm_vec3_scale(s_cameraUp, speed, tmp); glm_vec3_sub(s_cameraPos, tmp, s_cameraPos); }
 }
@@ -70,6 +71,36 @@ static uint32_t s_boxIndices[] = {
     16,17,18, 18,19,16,  20,21,22, 22,23,20,
 };
 
+static void build_batches(GeometryPassData* geo) {
+    RenderObject* objects = geo->objects;
+    uint32_t      count   = geo->objectCount;
+
+    for (uint32_t i = 1; i < count; i++) {
+        RenderObject tmp = objects[i];
+        uint32_t j = i;
+        while (j > 0 && objects[j-1].material > tmp.material) {
+            objects[j] = objects[j-1];
+            j--;
+        }
+        objects[j] = tmp;
+    }
+
+    geo->batchCount = 0;
+    uint32_t drawCmdOffset = 0;
+    for (uint32_t i = 0; i < count; ) {
+        uint32_t j = i + 1;
+        while (j < count && objects[j].material == objects[i].material)
+            j++;
+
+        GeometryBatch* b        = &geo->batches[geo->batchCount++];
+        b->representativeObject = &objects[i];
+        b->drawCommandOffset    = drawCmdOffset;
+        b->maxDrawCount         = j - i;
+        drawCmdOffset          += j - i;
+        i = j;
+    }
+}
+
 int main(void) {
     VkContext ctx;
     VkContextCreateInfo ctxInfo = {
@@ -95,9 +126,6 @@ int main(void) {
 
     VkTexture boxTex, skyboxTex;
     uint32_t  boxTexId = 0, skyboxTexId = 0;
-    VkMaterial boxMaterial, skyboxMaterial;
-    VkMesh     boxMesh;
-
     vkTextureLoad(&ctx, "assets/box.jpg", &boxTex, &boxTexId);
     const char* skyboxFaces[6] = {
         "assets/skybox/right.jpg", "assets/skybox/left.jpg",
@@ -106,10 +134,11 @@ int main(void) {
     };
     vkTextureLoadCubemap(&ctx, skyboxFaces, &skyboxTex, &skyboxTexId);
 
+    VkMesh boxMesh;
     VkMeshCreateInfo boxMeshInfo = {
         .vertexArray = s_boxVertices, .indexArray = s_boxIndices,
-        .vertexCount = sizeof(s_boxVertices)/sizeof(s_boxVertices[0]),
-        .indexCount  = sizeof(s_boxIndices) /sizeof(s_boxIndices[0]),
+        .vertexCount = sizeof(s_boxVertices) / sizeof(s_boxVertices[0]),
+        .indexCount  = sizeof(s_boxIndices)  / sizeof(s_boxIndices[0]),
     };
     vkMeshCreate(&ctx, &boxMeshInfo, &boxMesh);
 
@@ -117,12 +146,12 @@ int main(void) {
         { VK_SHADER_STAGE_VERTEX_BIT,   PASS_TYPE_GEOMETRY, "shaders/slang.spv",  "vertMain" },
         { VK_SHADER_STAGE_FRAGMENT_BIT, PASS_TYPE_GEOMETRY, "shaders/slang.spv",  "fragMain" },
     };
-
     VkShaderStageCreateInfo skyboxStages[] = {
-        { VK_SHADER_STAGE_VERTEX_BIT, PASS_TYPE_GEOMETRY,   "shaders/skybox.spv", "vertMain" },
+        { VK_SHADER_STAGE_VERTEX_BIT,   PASS_TYPE_GEOMETRY, "shaders/skybox.spv", "vertMain" },
         { VK_SHADER_STAGE_FRAGMENT_BIT, PASS_TYPE_GEOMETRY, "shaders/skybox.spv", "fragMain" },
     };
-    uint32_t skyboxStageCount = sizeof(skyboxStages) / sizeof(skyboxStages[0]);
+
+    VkMaterial boxMaterial, skyboxMaterial;
 
     VkPipelineBuilder boxBuilder = vkPipelineBuilderCreateDefault();
     boxBuilder.stages      = meshStages;
@@ -130,12 +159,12 @@ int main(void) {
     boxBuilder.colorFormat = window.swapChainSurfaceFormat.format;
     boxBuilder.depthFormat = VK_FORMAT_D32_SFLOAT;
     boxBuilder.msaaSamples = ctx.msaaSamples;
-    vkMaterialBuild(&ctx, &renderer, &boxBuilder, &boxMaterial);
+    vkMaterialInit(&boxMaterial, &boxBuilder);
     vkMaterialSetParam(&boxMaterial, "textureIndex", mpUint(boxTexId));
 
     VkPipelineBuilder skyboxBuilder    = vkPipelineBuilderCreateDefault();
     skyboxBuilder.stages               = skyboxStages;
-    skyboxBuilder.stageCount           = skyboxStageCount;
+    skyboxBuilder.stageCount           = 2;
     skyboxBuilder.colorFormat          = window.swapChainSurfaceFormat.format;
     skyboxBuilder.depthFormat          = VK_FORMAT_D32_SFLOAT;
     skyboxBuilder.msaaSamples          = ctx.msaaSamples;
@@ -144,34 +173,36 @@ int main(void) {
     skyboxBuilder.depthCompareOp       = VK_COMPARE_OP_LESS_OR_EQUAL;
     skyboxBuilder.vertexBindingCount   = 0;
     skyboxBuilder.vertexAttributeCount = 0;
-    result = vkMaterialBuild(&ctx, &renderer, &skyboxBuilder, &skyboxMaterial);
-    if (result.status != VULKAN_SUCCESS) LOG_WARN("Failed to build skybox material");
-
-    vkMaterialSetParam(&boxMaterial,    "textureIndex", mpUint(boxTexId));
+    vkMaterialInit(&skyboxMaterial, &skyboxBuilder);
     vkMaterialSetParam(&skyboxMaterial, "textureIndex", mpUint(skyboxTexId));
 
     RenderObject objects[MAX_OBJECTS];
     uint32_t     objectCount = 0;
     for (int i = 0; i < MESH_AMOUNT; i++) {
-        objects[objectCount++] = (RenderObject){
+        objects[objectCount] = (RenderObject){
             .mesh     = &boxMesh,
             .material = &boxMaterial,
         };
-        glm_mat4_identity(objects[objectCount - 1].transform);
+        glm_mat4_identity(objects[objectCount].transform);
+        objectCount++;
     }
 
-    uint32_t skyboxIndex = objectCount;
-    objects[objectCount++] = (RenderObject){
-        .mesh     = NULL, 
-        .material = &skyboxMaterial,
-    };
-    glm_mat4_identity(objects[objectCount - 1].transform);
-
     GeometryPassData geometryData = {0};
+    CullPassData     cullData     = {0};
+
     geometryData.objects     = objects;
     geometryData.objectCount = objectCount;
 
+    build_batches(&geometryData);
+
+    cullData.objects      = objects;
+    cullData.objectCount  = &geometryData.objectCount;
+    cullData.geometryData = &geometryData;
+    geometryData.cullData = &cullData;
+
+    RenderPass cullPass     = cullPassCreate(&cullData);
     RenderPass geometryPass = geometryPassCreate(&geometryData);
+    vkRendererAddPass(&renderer, &cullPass);
     vkRendererAddPass(&renderer, &geometryPass);
 
     double lastTime   = glfwGetTime();
@@ -220,23 +251,27 @@ int main(void) {
             if (objects[i].mesh) {
                 glm_vec3_copy(objects[i].mesh->local_min, ssbo[i].local_min);
                 glm_vec3_copy(objects[i].mesh->local_max, ssbo[i].local_max);
+
+                ssbo[i].indexCount   = objects[i].mesh->indexCount;
+                ssbo[i].firstIndex   = 0;
+                ssbo[i].vertexOffset = 0;
             } else {
                 glm_vec3_zero(ssbo[i].local_min);
                 glm_vec3_zero(ssbo[i].local_max);
+                ssbo[i].indexCount   = 0;
+                ssbo[i].firstIndex   = 0;
+                ssbo[i].vertexOffset = 0;
             }
         }
 
         float aspect = (float)window.swapChainExtent.width /
                        (float)window.swapChainExtent.height;
-        vec3 center; glm_vec3_add(s_cameraPos, s_cameraFront, center);
+        vec3 center;
+        glm_vec3_add(s_cameraPos, s_cameraFront, center);
         glm_lookat(s_cameraPos, center, s_cameraUp, geometryData.ubo.view);
         glm_perspective(glm_rad(60.0f), aspect, 0.1f, 100.0f, geometryData.ubo.proj);
         geometryData.ubo.proj[1][1] *= -1.0f;
         glm_mat4_inv(geometryData.ubo.proj, geometryData.ubo.invProj);
-
-        mat4 viewProj;
-        glm_mat4_mul(geometryData.ubo.proj, geometryData.ubo.view, viewProj);
-        geometryData.objectCount = objectCount;
 
         result = vkRendererBeginFrame(&renderer);
         if (result.status == VULKAN_STATUS_SWAPCHAIN_OUTDATED) {
@@ -260,8 +295,6 @@ int main(void) {
 
     vkTextureDestroy(&ctx, &boxTex);
     vkTextureDestroy(&ctx, &skyboxTex);
-    vkMaterialDestroy(&ctx, &boxMaterial);
-    vkMaterialDestroy(&ctx, &skyboxMaterial);
     vkMeshDestroy(&ctx, &boxMesh);
     vkWindowDestroy(&ctx, &window);
     vkContextDestroy(&ctx);

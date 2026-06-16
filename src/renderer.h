@@ -22,8 +22,6 @@ typedef struct VkRenderer {
     RenderPass* passes[RENDERER_MAX_PASSES];
     uint32_t    passCount;
 
-    VkDescriptorSetLayout setLayouts[PASS_TYPE_COUNT];
-
     uint32_t frameIndex;
     uint32_t imageIndex;
     bool     frameActive;

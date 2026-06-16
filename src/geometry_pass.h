@@ -3,9 +3,11 @@
 
 #include "render_pass.h"
 #include "render_types.h"
-#include "material.h"
+#include "pipeline_cache.h"
 #include "buffer.h"
 #include <cglm/cglm.h>
+
+typedef struct CullPassData CullPassData;
 
 typedef struct GeometryPassUBO {
     mat4 proj;
@@ -13,18 +15,27 @@ typedef struct GeometryPassUBO {
     mat4 invProj;
 } GeometryPassUBO;
 
+typedef struct GeometryBatch {
+    RenderObject* representativeObject;
+    uint32_t      drawCommandOffset;
+    uint32_t      drawCountOffset;
+    uint32_t      maxDrawCount;
+} GeometryBatch;
+
 typedef struct GeometryPassData {
-    RenderObject* objects;
-    uint32_t      objectCount;
+    RenderObject*   objects;
+    uint32_t        objectCount;
+    GeometryBatch   batches[MAX_OBJECTS];
+    uint32_t        batchCount;
     GeometryPassUBO ubo;
-
-    VkDescriptorSetLayout setLayout;
-    VkDescriptorPool      pool;
-    VkDescriptorSet       sets[MAX_FRAMES_IN_FLIGHT];
-    VulkanBuffer          uboBuffers[MAX_FRAMES_IN_FLIGHT];
-
-    VkFormat colorFormat;
-    VkFormat depthFormat;
+    CullPassData*   cullData;
+    VkDescriptorSetLayout passSetLayout;
+    VkDescriptorPool      passPool;
+    VkDescriptorSet       passSets[MAX_FRAMES_IN_FLIGHT];
+    VulkanBuffer          passUboBuffers[MAX_FRAMES_IN_FLIGHT];
+    PipelineCache   pipelines;
+    VkFormat        colorFormat;
+    VkFormat        depthFormat;
 } GeometryPassData;
 
 RenderPass geometryPassCreate(GeometryPassData* pdata);

@@ -603,9 +603,18 @@ static VulkanResult create_logical_device(VkContext* ctx) {
         .shaderDrawParameters = VK_TRUE
     };
 
+    VkPhysicalDeviceVulkan12Features vk12Features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .pNext = &vk11Features,
+        .drawIndirectCount = VK_TRUE,
+        .descriptorBindingPartiallyBound = VK_TRUE,
+        .runtimeDescriptorArray = VK_TRUE,
+        .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE
+    };
+
     VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extDynamicState = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
-        .pNext = &vk11Features,
+        .pNext = &vk12Features, 
         .extendedDynamicState = VK_TRUE
     };
 
@@ -616,17 +625,9 @@ static VulkanResult create_logical_device(VkContext* ctx) {
         .synchronization2 = VK_TRUE
     };
 
-    VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES,
-        .pNext = &vk13Features, 
-        .descriptorBindingPartiallyBound = VK_TRUE,
-        .runtimeDescriptorArray = VK_TRUE,
-        .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE
-    };
-
     VkPhysicalDeviceFeatures2 features2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &indexingFeatures,
+        .pNext = &vk13Features,
         .features.samplerAnisotropy = VK_TRUE,
         .features.fillModeNonSolid = VK_TRUE,
         .features.sampleRateShading = (ctx->msaaSamples > VK_SAMPLE_COUNT_1_BIT) ? VK_TRUE : VK_FALSE,

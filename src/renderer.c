@@ -80,26 +80,6 @@ static void transition_image_for_present(VkCommandBuffer cmd,
     vkCmdPipelineBarrier2(cmd, &dep);
 }
 
-static VulkanResult create_layouts_for_render_passes(VkContext* ctx, VkRenderer* renderer) {
-    VkDescriptorSetLayoutBinding uboBinding = {
-        .binding         = 0,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-    };
-    VkDescriptorSetLayoutCreateInfo dslCI = {
-        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings    = &uboBinding,
-    };
-    VkResult vr = vkCreateDescriptorSetLayout(ctx->logicalDevice, &dslCI, NULL, &renderer->setLayouts[PASS_TYPE_GEOMETRY]);
-    if (vr != VK_SUCCESS) {
-        LOG_ERROR("vkRendererCreate: Failed to create descriptor set layout for geometry pass");
-        return (VulkanResult){ .status = VULKAN_ERROR_DESCRIPTOR_SET_LAYOUT_CREATION_FAILED, .vk_result = vr };
-    }
-    return (VulkanResult){ .status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS }; 
-}
-
 VulkanResult vkRendererCreate(VkContext* ctx, VkWindow* window, VkRenderer* out) {
     if (!ctx || !window || !out)
         return (VulkanResult){ .status = VULKAN_ERROR_INSTANCE_CREATION_FAILED,
@@ -107,10 +87,6 @@ VulkanResult vkRendererCreate(VkContext* ctx, VkWindow* window, VkRenderer* out)
     memset(out, 0, sizeof(VkRenderer));
     out->ctx    = ctx;
     out->window = window;
-    VulkanResult res = create_layouts_for_render_passes(ctx, out);
-    if (res.status != VULKAN_SUCCESS) {
-        return res;
-    }
     return (VulkanResult){ .status = VULKAN_SUCCESS, .vk_result = VK_SUCCESS };
 }
 
@@ -152,11 +128,6 @@ void vkRendererDestroy(VkRenderer* r) {
         RenderPass* pass = r->passes[i];
         if (pass && pass->iface.destroy)
             pass->iface.destroy(pass, r->ctx);
-    }
-    for (uint32_t i = 0; i < PASS_TYPE_COUNT; i++) {
-        if (r->setLayouts[i] != VK_NULL_HANDLE) {
-            vkDestroyDescriptorSetLayout(r->ctx->logicalDevice, r->setLayouts[i], NULL);
-        }
     }
     memset(r, 0, sizeof(VkRenderer));
 }

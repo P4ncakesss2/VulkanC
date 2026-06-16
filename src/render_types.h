@@ -16,7 +16,10 @@ typedef struct ObjectSSBO {
     vec3  local_min;
     float pad0;
     vec3  local_max; 
-    float pad1;
+    uint indexCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint pad1;
 } ObjectSSBO;
 
 typedef struct RenderObject {

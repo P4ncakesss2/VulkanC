@@ -15,7 +15,10 @@ struct ObjectData {
     float3 localMin;
     float pad0;
     float3 localMax;
-    float pad1;
+    uint indexCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint pad1;
 };
 [[vk::binding(1, 0)]] StructuredBuffer<ObjectData> objectData;
 [[vk::binding(2, 0)]] TextureCube                  cubemapArray[];
